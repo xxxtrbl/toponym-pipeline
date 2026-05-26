@@ -1,34 +1,23 @@
 """
-Iteration 1: Zero-shot toponym extraction from OCR page JSON files.
+Iteration 1: Zero-shot toponym extraction from OCR ndjson.
 
 Usage:
-    python3 extract_toponyms.py --input trial/ --output output/ --limit 10
+    python3 extract_toponyms.py --input data/ocr.ndjson --output output/ \
+        --book III-5-C-22--V-1 --pages 7-425 --lang en
 """
 
 import argparse
 import json
 import re
 import sys
-from collections import defaultdict
+from collections import Counter
 from pathlib import Path
 
+import networkx as nx
 import ollama
-from lingua import Language, LanguageDetectorBuilder
-
-SUPPORTED_LANGUAGES = [
-    Language.ENGLISH,
-    Language.FRENCH,
-    Language.RUSSIAN,
-    Language.CHINESE,
-    Language.JAPANESE,
-    Language.GERMAN,
-]
-
-detector = LanguageDetectorBuilder.from_languages(*SUPPORTED_LANGUAGES).build()
 
 PROMPT = """\
 Extract all place names (toponyms) from the text below.
-Toponyms include: cities, historical sites, ancient kingdoms, regions, mountain ranges, rivers, and deserts.
 
 If no toponyms are found, return an empty array [].
 Return ONLY a JSON array of strings, one toponym per item, no explanation.
@@ -44,16 +33,75 @@ Text: {context}
 Term: [{candidate}]"""
 
 CONTEXT_CHARS = 150
+GRAPH_FREQ_THRESHOLD = 0.15  # exclude toponyms appearing on more than this fraction of pages from the graph
 
 
-def detect_language(text: str) -> Language | None:
-    if not text or len(text.strip()) < 15:
-        return None
-    return detector.detect_language_of(text)
+def parse_page_range(s: str) -> tuple[int, int]:
+    """Parse '7-425' into (7, 425). Single number '7' becomes (7, 7)."""
+    if "-" in s:
+        lo, hi = s.split("-", 1)
+        return int(lo), int(hi)
+    n = int(s)
+    return n, n
 
 
-def build_prompt(text: str, language: Language) -> str:
-    return PROMPT.format(text=text)
+def page_number(custom_id: str) -> int | None:
+    """Extract page number from custom_id like 'III-5-C-22--V-1_page0007' → 7."""
+    parts = custom_id.rsplit("_page", 1)
+    if len(parts) == 2:
+        try:
+            return int(parts[1])
+        except ValueError:
+            pass
+    return None
+
+
+def iter_pages(ndjson_path: str, book: str | None, lang: str | None,
+               page_range: tuple[int, int] | None, limit: int | None):
+    """Stream matching records from ndjson."""
+    count = 0
+    with open(ndjson_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "_index" in rec:
+                continue
+
+            cid = rec.get("custom_id", "")
+
+            if book and not cid.startswith(book):
+                continue
+            if lang and rec.get("language") != [lang]:
+                continue
+            if page_range is not None:
+                pnum = page_number(cid)
+                if pnum is None or not (page_range[0] <= pnum <= page_range[1]):
+                    continue
+
+            yield rec
+            count += 1
+            if limit and count >= limit:
+                break
+
+
+def preprocess_text(text: str) -> str:
+    """Join line-break hyphens, then replace remaining newlines with spaces."""
+    text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
+    return text.replace('\n', ' ')
+
+
+def dedup_toponyms(toponyms: list[str]) -> list[str]:
+    unique = list(dict.fromkeys(toponyms))
+    lower = [t.lower() for t in unique]
+    return [
+        t for i, t in enumerate(unique)
+        if not any(lower[i] in lower[j] for j in range(len(unique)) if j != i and lower[i] != lower[j])
+    ]
 
 
 def parse_toponyms(response: str) -> list[str]:
@@ -68,7 +116,6 @@ def parse_toponyms(response: str) -> list[str]:
 
 
 def find_in_text(text: str, candidate: str) -> int | None:
-    """Return start position of candidate in text (case-insensitive), or None if not found."""
     match = re.search(re.escape(candidate), text, re.IGNORECASE)
     return match.start() if match else None
 
@@ -86,12 +133,11 @@ def verify_toponym(candidate: str, context: str, model: str) -> bool:
 
 
 def filter_with_context(candidates: list[str], text: str, model: str) -> tuple[list[str], list[str]]:
-    """Verify each candidate against its context. Returns (confirmed, rejected)."""
     confirmed, rejected = [], []
     for candidate in candidates:
         pos = find_in_text(text, candidate)
         if pos is None:
-            rejected.append(candidate)  # not in source text — hallucination
+            rejected.append(candidate)  # hallucination — not in source text
             continue
         context = get_context(text, pos, len(candidate))
         if verify_toponym(candidate, context, model):
@@ -101,80 +147,55 @@ def filter_with_context(candidates: list[str], text: str, model: str) -> tuple[l
     return confirmed, rejected
 
 
-def process_page(page: dict, model: str) -> tuple[list[str], list[str], Language | None]:
-    """Run toponym extraction on a single page. Returns (confirmed, rejected, detected_language)."""
-    text = page.get("body_text", "").strip()
-
+def process_page(page: dict, model: str) -> tuple[list[str], list[str]]:
+    text = preprocess_text(page.get("body_text", "").strip())
     if not text or text == "(empty)":
-        return [], [], None
-
-    language = detect_language(text)
-    if language is None:
-        return [], [], None
-
-    prompt = build_prompt(text, language)
+        return [], []
+    prompt = PROMPT.format(text=text)
     response = ollama.generate(model=model, prompt=prompt, options={"temperature": 0})
     raw = parse_toponyms(response["response"])
-    confirmed, rejected = filter_with_context(raw, text, model)
-
-    return confirmed, rejected, language
+    return filter_with_context(raw, text, model)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Zero-shot toponym extraction (Iteration 1)")
-    parser.add_argument("--input", required=True, help="Folder with OCR page JSON files")
+    parser.add_argument("--input", required=True, help="Path to ocr.ndjson")
     parser.add_argument("--output", required=True, help="Output folder")
+    parser.add_argument("--book", default=None, help="Book ID prefix to filter, e.g. III-5-C-22--V-1")
+    parser.add_argument("--lang", default=None, help="Language code to filter, e.g. en")
+    parser.add_argument("--pages", default=None, help="Page range, e.g. 7-425")
     parser.add_argument("--limit", type=int, default=None, help="Max number of pages to process")
     parser.add_argument("--model", default="qwen2.5:7b", help="Ollama model name")
     args = parser.parse_args()
 
-    input_dir = Path(args.input)
+    page_range = parse_page_range(args.pages) if args.pages else None
+
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Collect page files, skip retry error files
-    page_files = sorted(
-        f for f in input_dir.glob("*_page*.json")
-        if "retry.error" not in f.name
-    )
+    pages = iter_pages(args.input, args.book, args.lang, page_range, args.limit)
 
-    if args.limit:
-        page_files = page_files[: args.limit]
-
-    print(f"Processing {len(page_files)} pages with model '{args.model}'...")
-
-    # Output data structures
-    page_toponyms: dict[str, list[str]] = {}                          # page_id → [toponyms]
-    cooccurrence: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))  # toponym → {toponym → count}
+    page_toponyms: dict[str, list[str]] = {}
     log_path = output_dir / "log.jsonl"
 
+    # Pass 1: extract toponyms from all pages
+    i = 0
     with open(log_path, "w", encoding="utf-8") as log_file:
-        for i, page_file in enumerate(page_files):
-            with open(page_file, encoding="utf-8") as f:
-                page = json.load(f)
-
-            page_id = page.get("custom_id", page_file.stem)
+        for page in pages:
+            i += 1
+            page_id = page.get("custom_id", f"page_{i}")
 
             try:
-                toponyms, rejected, language = process_page(page, args.model)
+                toponyms, rejected = process_page(page, args.model)
             except Exception as e:
-                print(f"  [{i+1}/{len(page_files)}] ERROR {page_id}: {e}", file=sys.stderr)
+                print(f"  [{i}] ERROR {page_id}: {e}", file=sys.stderr)
                 continue
 
-            lang_name = language.name if language else "skipped"
-            page_toponyms[page_id] = toponyms
+            page_toponyms[page_id] = dedup_toponyms(toponyms)
 
-            # Update co-occurrence graph: link every pair of toponyms on this page
-            for j, t1 in enumerate(toponyms):
-                for t2 in toponyms[j + 1:]:
-                    if t1 != t2:
-                        cooccurrence[t1][t2] += 1
-                        cooccurrence[t2][t1] += 1
-
-            # Write one log entry per page
             log_entry = {
                 "page_id": page_id,
-                "language": lang_name,
+                "language": page.get("language"),
                 "toponym_count": len(toponyms),
                 "toponyms": toponyms,
                 "rejected": rejected,
@@ -182,18 +203,39 @@ def main():
             log_file.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
             status = f"{len(toponyms)} toponyms" if toponyms else "none / skipped"
-            print(f"  [{i+1}/{len(page_files)}] {page_id} ({lang_name}): {status}")
+            print(f"  [{i}] {page_id}: {status}")
 
-    # Save summary files
     with open(output_dir / "page_toponyms.json", "w", encoding="utf-8") as f:
         json.dump(page_toponyms, f, ensure_ascii=False, indent=2)
 
-    with open(output_dir / "cooccurrence_graph.json", "w", encoding="utf-8") as f:
-        json.dump(cooccurrence, f, ensure_ascii=False, indent=2)
+    # Frequency filter: count how many pages each toponym appears on
+    page_freq: Counter = Counter()
+    for toponyms in page_toponyms.values():
+        for t in set(toponyms):
+            page_freq[t] += 1
 
-    total_toponyms = sum(len(v) for v in page_toponyms.values())
-    unique_toponyms = len(cooccurrence)
-    print(f"\nDone. {total_toponyms} total extractions, {unique_toponyms} unique toponyms.")
+    threshold_count = i * GRAPH_FREQ_THRESHOLD
+    high_freq = {t for t, count in page_freq.items() if count > threshold_count}
+    if high_freq:
+        print(f"\nExcluding {len(high_freq)} high-frequency toponyms from graph "
+              f"(>{GRAPH_FREQ_THRESHOLD * 100:.0f}% of pages): {sorted(high_freq)}")
+
+    # Pass 2: build co-occurrence graph excluding high-frequency toponyms
+    G = nx.Graph()
+    for toponyms in page_toponyms.values():
+        filtered = [t for t in toponyms if t not in high_freq]
+        for j, t1 in enumerate(filtered):
+            for t2 in filtered[j + 1:]:
+                if t1 != t2:
+                    if G.has_edge(t1, t2):
+                        G[t1][t2]["weight"] += 1
+                    else:
+                        G.add_edge(t1, t2, weight=1)
+
+    nx.write_gexf(G, output_dir / "cooccurrence_graph.gexf")
+
+    total = sum(len(v) for v in page_toponyms.values())
+    print(f"\nDone. {i} pages processed, {total} total extractions, {G.number_of_nodes()} unique toponyms in graph.")
     print(f"Results saved to {output_dir}/")
 
 
