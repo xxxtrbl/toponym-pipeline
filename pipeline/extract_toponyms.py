@@ -13,8 +13,10 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+import os
+
 import networkx as nx
-import ollama
+from openai import OpenAI
 
 PROMPT = """\
 Extract all place names (toponyms) from the text below.
@@ -126,13 +128,18 @@ def get_context(text: str, position: int, length: int) -> str:
     return f"...{text[start:position]}[{text[position:position+length]}]{text[position+length:end]}..."
 
 
-def verify_toponym(candidate: str, context: str, model: str) -> bool:
+def verify_toponym(candidate: str, context: str, client: OpenAI, model: str) -> bool:
     prompt = VERIFY_PROMPT.format(context=context, candidate=candidate)
-    response = ollama.generate(model=model, prompt=prompt, options={"temperature": 0})
-    return response["response"].strip().lower().startswith("yes")
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=16,
+    )
+    return response.choices[0].message.content.strip().lower().startswith("yes")
 
 
-def filter_with_context(candidates: list[str], text: str, model: str) -> tuple[list[str], list[str]]:
+def filter_with_context(candidates: list[str], text: str, client: OpenAI, model: str) -> tuple[list[str], list[str]]:
     confirmed, rejected = [], []
     for candidate in candidates:
         pos = find_in_text(text, candidate)
@@ -140,21 +147,26 @@ def filter_with_context(candidates: list[str], text: str, model: str) -> tuple[l
             rejected.append(candidate)  # hallucination — not in source text
             continue
         context = get_context(text, pos, len(candidate))
-        if verify_toponym(candidate, context, model):
+        if verify_toponym(candidate, context, client, model):
             confirmed.append(candidate)
         else:
             rejected.append(candidate)
     return confirmed, rejected
 
 
-def process_page(page: dict, model: str) -> tuple[list[str], list[str]]:
+def process_page(page: dict, client: OpenAI, model: str) -> tuple[list[str], list[str]]:
     text = preprocess_text(page.get("body_text", "").strip())
     if not text or text == "(empty)":
         return [], []
     prompt = PROMPT.format(text=text)
-    response = ollama.generate(model=model, prompt=prompt, options={"temperature": 0})
-    raw = parse_toponyms(response["response"])
-    return filter_with_context(raw, text, model)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=512,
+    )
+    raw = parse_toponyms(response.choices[0].message.content)
+    return filter_with_context(raw, text, client, model)
 
 
 def main():
@@ -165,8 +177,13 @@ def main():
     parser.add_argument("--lang", default=None, help="Language code to filter, e.g. en")
     parser.add_argument("--pages", default=None, help="Page range, e.g. 7-425")
     parser.add_argument("--limit", type=int, default=None, help="Max number of pages to process")
-    parser.add_argument("--model", default="qwen2.5:7b", help="Ollama model name")
+    parser.add_argument("--model", default="qwen3-72b", help="Model name served by vLLM")
     args = parser.parse_args()
+
+    client = OpenAI(
+        base_url=os.environ.get("VLLM_BASE_URL", "http://localhost:8080/v1"),
+        api_key="dummy",
+    )
 
     page_range = parse_page_range(args.pages) if args.pages else None
 
@@ -186,7 +203,7 @@ def main():
             page_id = page.get("custom_id", f"page_{i}")
 
             try:
-                toponyms, rejected = process_page(page, args.model)
+                toponyms, rejected = process_page(page, client, args.model)
             except Exception as e:
                 print(f"  [{i}] ERROR {page_id}: {e}", file=sys.stderr)
                 continue

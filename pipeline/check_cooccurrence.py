@@ -17,8 +17,10 @@ import re
 import sys
 from pathlib import Path
 
+import os
+
 import networkx as nx
-import ollama
+from openai import OpenAI
 from rapidfuzz.distance import Levenshtein
 
 CONTEXT_CHARS = 150
@@ -147,10 +149,15 @@ def get_context(text: str, position: int, length: int) -> str:
     return f"...{before}[{text[position:position+length]}]{after}..."
 
 
-def verify_candidate(candidate: str, context: str, model: str) -> bool:
+def verify_candidate(candidate: str, context: str, client: OpenAI, model: str) -> bool:
     prompt = VERIFY_PROMPT.format(context=context, candidate=candidate)
-    response = ollama.generate(model=model, prompt=prompt, options={"temperature": 0})
-    return response["response"].strip().lower().startswith("yes")
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=16,
+    )
+    return response.choices[0].message.content.strip().lower().startswith("yes")
 
 
 def main():
@@ -158,9 +165,14 @@ def main():
     parser.add_argument("--input", required=True, help="Path to ocr.ndjson")
     parser.add_argument("--iter1", required=True, help="Folder with Iteration 1 output")
     parser.add_argument("--output", required=True, help="Output folder for Iteration 2 results")
-    parser.add_argument("--model", default="qwen2.5:7b", help="Ollama model name")
+    parser.add_argument("--model", default="qwen3-72b", help="Model name served by vLLM")
     parser.add_argument("--limit", type=int, default=None, help="Max pages to process")
     args = parser.parse_args()
+
+    client = OpenAI(
+        base_url=os.environ.get("VLLM_BASE_URL", "http://localhost:8080/v1"),
+        api_key="dummy",
+    )
 
     iter1_dir = Path(args.iter1)
     output_dir = Path(args.output)
@@ -220,7 +232,7 @@ def main():
                     candidates = fuzzy_search(text, variant)
                     for candidate in candidates:
                         context = get_context(text, candidate["position"], len(candidate["text"]))
-                        if verify_candidate(candidate["text"], context, args.model):
+                        if verify_candidate(candidate["text"], context, client, args.model):
                             newly_confirmed.append(strip_punctuation(candidate["text"]))
                             found = True
                             break
