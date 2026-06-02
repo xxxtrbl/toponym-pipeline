@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir \
     lingua-language-detector
 
 COPY pipeline/ ./pipeline/
+COPY data/ocr.ndjson ./data/ocr.ndjson
 
 ENV VLLM_BASE_URL=http://localhost:8080/v1
 
