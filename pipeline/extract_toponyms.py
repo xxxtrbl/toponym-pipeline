@@ -37,8 +37,8 @@ Output: ["Germany", "Britain"]
 Input: It brought in 4275 tonnes of British mutton from Ireland, some 10 percent of overall imports.
 Output: ["Ireland"]
 
-Input: In the T'ang period, several Indian and Persian texts were translated.
-Output: []
+Input: The plant was first mentioned in the T'ang period as growing in the country Hi, and came from Ñan-tuñ in Korea.
+Output: ["Hi", "Ñan-tuñ", "Korea"]
 
 Text:
 {text}"""
