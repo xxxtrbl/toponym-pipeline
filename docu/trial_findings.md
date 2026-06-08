@@ -181,3 +181,115 @@ Run on 425 English pages from III-5-C-22--V-1 with V3 prompt + filter loop + qwe
 **Root cause of remaining errors:** The 7B model is insufficiently reliable for the verification step. Both directions of error — confirming non-toponyms and rejecting real toponyms — are attributable to the 7B model's limited judgment. The pipeline architecture (broad extraction + context-based filter) is correct; the bottleneck is model capacity.
 
 **Expected improvement with Qwen3-72B:** Both false positive patterns (botanical pages, deity names) and false negatives (real toponyms rejected) should improve substantially with the larger model.
+
+---
+
+## English Iteration 2 — Sino-Iranica (first 50 pages)
+
+**Annotation convention:** plain = true positive · `?word` = false positive · `#word` = false negative (marked in `output0529_en/iter2/page_toponyms.json`)
+
+**iter1 vs iter2 (full book, 464 pages):**
+
+| Metric | iter1 | iter2 | Change |
+|--------|------:|------:|-------:|
+| Total mentions | 2,495 | 2,991 | +496 |
+| Unique toponyms | 968 | 1,094 | **+126** |
+| Pages changed | — | — | 226 |
+
+**Overall metrics (first 50 pages):**
+
+| Metric | Value |
+|--------|-------|
+| True Positives (TP) | 244 |
+| False Positives (FP) | 20 |
+| False Negatives (FN) | 30 |
+| **Precision** | **92.4%** |
+| **Recall** | **89.1%** |
+| **F1** | **90.7%** |
+
+Pages evaluated: 35 non-empty out of 50 · pages with ≥1 FP: 10 · pages with ≥1 FN: 16
+
+**False positives (20):** Mainly dynasty/period names (`T'ang` ×4, `Tsin`), Zoroastrian deity names (`Āçtād`, `Āsmān`, `Zamyād`, `Māraspend`, `Anīrān`), ethnic/language adjectives (`Iranian`, `Chinese`, `Indian`, `Turkish`), uncertain proper nouns (`Samanides`, `Arabs/Syrians/Turkish`, `Šu`, `far east`, `Mediterranean`).
+
+**False negatives (30):** `Iran` (×4), `China` (×3), `America` (×2), missed variant forms (`Ši/Tashkend`, `Ta-yüan`, `Ta-ši`, `Grape City`), rare/obscure toponyms (`Massagetae`, `Chalybonian`, `Lydia`, `rGya`, `Bal`, `Mon`), and names from low-density passages (`France`, `Pamir`, `Fergana`, `Si-fan`, `T'ien-ču`).
+
+**Notable pages:**
+- **p0020** (TP=6, FP=7): worst precision — Zoroastrian deity names all confirmed as FP
+- **p0029** (TP=17, FP=2, FN=4): largest page, good overall but missed Tibetan transliterations (`Bal`, `Mon`, `rGya`, `Li`)
+- **p0023, p0025, p0026, p0034, p0037, p0038, p0041, p0044, p0045, p0046**: perfect (F1=1.0)
+
+**Conclusion:** English Iter 2 achieves strong performance (F1=90.7%), a clear improvement in overall quality. Main FP driver is the Zoroastrian deity page (p0020) and recurring dynasty-name leakage (`T'ang`). Main FN driver is variant/compound toponym forms and low-density passages. The 126 new unique toponyms recovered in Iter 2 are a meaningful gain across the full book.
+
+---
+
+## Chinese Iteration 2 — Archaeological Report in Turfan (first 50 pages)
+
+**Annotation convention:** plain = true positive · `?word` = false positive · `#word` = false negative (marked in `output0529_zh/iter2/page_toponyms.json`)
+
+**iter1 vs iter2 (full book, 238 pages):**
+
+| Metric | iter1 | iter2 | Change |
+|--------|------:|------:|-------:|
+| Total mentions | 224 | 276 | +52 |
+| Unique toponyms | 137 | 178 | **+41** |
+| Pages changed | — | — | — |
+
+**Overall metrics (first 50 pages):**
+
+| Metric | Value |
+|--------|-------|
+| True Positives (TP) | 129 |
+| False Positives (FP) | 10 |
+| False Negatives (FN) | 33 |
+| **Precision** | **92.8%** |
+| **Recall** | **79.6%** |
+| **F1** | **85.7%** |
+
+Pages evaluated: 26 non-empty out of 50 · pages with ≥1 FP: 5 · pages with ≥1 FN: 13
+
+**False positives (10):** Generic/landscape terms (`大沙漠` "great desert", `灣岸` "bay shore"), structural terms misread as place names (`北` "north", `牆城` "walled city", `基城` "foundation city"), unclear partial strings (`疆`, `猶爾闢`, `哥嘗`), and erroneous compound splits (`土子諸克格溝口`, `土拉`).
+
+**False negatives (33):** `吐魯番` (×3), `波斯` (×2), `雅爾湖` (×2), `新疆` (×2), `野木什` (×2) — recurring high-frequency toponyms still missed in dense passages. Page 0022 alone accounts for 13 FNs (`羅馬`, `安息`, `七聖廟`, `三道嶺`, `廟泉`, `吐哈溝`, `野木什`, `勝金口`, `紅山`, `克沁`, `尼雅卓`, `南疆`, `新疆`).
+
+**Notable pages:**
+- **p0041** (TP=0, FP=3): all three extractions wrong — structural terms `北`, `牆城`, `基城`
+- **p0022** (TP=17, FP=0, FN=13): high recall failure — dense site survey list, model extracted 17 but missed 13 more
+- **p0006, p0007, p0008, p0010, p0011, p0017, p0028**: perfect (F1=1.0)
+
+**Conclusion:** Chinese Iter 2 achieves F1=85.7%, a significant improvement over Iter 1. Precision (92.8%) is good but lower than German/English due to structural terms and partial strings leaking through. Recall (79.6%) remains the main bottleneck — dense toponym lists like p0022 still defeat the model. The 41 new unique toponyms recovered in Iter 2 represent a substantial gain for Chinese.
+
+---
+
+## German Iteration 2 — Eine Routenaufnahme durch Ostpersien (first 50 pages)
+
+**Annotation convention:** plain = true positive · `?word` = false positive · `#word` = false negative (marked in `output0529_de/iter2/page_toponyms.json`)
+
+**iter1 vs iter2 (full book, 632 pages):**
+
+| Metric | iter1 | iter2 | Change |
+|--------|------:|------:|-------:|
+| Pages with toponyms | 353 | 353 | 0 |
+| Total mentions | 3,504 | 3,758 | +254 |
+| Unique toponyms | 2,578 | 2,669 | **+91** |
+| Pages changed | — | — | 126 |
+
+Iter 2 recovered 91 new unique toponyms across 126 pages, all additions with no removals. New entries are mostly obscure Persian place names and regional variants (`Ahvân`, `Gaud-i-Neh`, `Kevir-See`, `Keschefrüd`, etc.).
+
+**Overall metrics (first 50 pages):**
+
+| Metric | Value |
+|--------|-------|
+| True Positives (TP) | 122 |
+| False Positives (FP) | 3 |
+| False Negatives (FN) | 6 |
+| **Precision** | **97.6%** |
+| **Recall** | **95.3%** |
+| **F1** | **96.4%** |
+
+Pages evaluated: 23 non-empty out of 50 · pages with ≥1 FP: 2 · pages with ≥1 FN: 5
+
+**False positives (3):** `Oasen`, `See`, `Oase` — generic German words for oasis/lake extracted as place names on pages 0018 and 0044.
+
+**False negatives (6):** `Persien` (×2, pages 0015 and 0018), `Chotan` (p0016), `Kevir` (p0019), `Laut-i-schaman` (p0029 — caption only), `Närächai Kuh` (p0041).
+
+**Conclusion:** German Iter 2 performs best of all three languages — F1 of 96.4% with near-perfect precision (97.6%) and recall (95.3%). Errors are minimal: the 3 FPs are generic landscape terms (`Oase`, `See`) that the model mistakes for place names; the 6 FNs are mostly toponyms buried in low-density passages or caption-only text the pipeline cannot reach. The 91 new unique toponyms recovered in Iter 2 represent a meaningful gain over the German corpus.
