@@ -24,9 +24,7 @@ You are an accurate Named Entity Recognition system specialized in toponym extra
 Your task: identify all place names (toponyms) in the text below.
 
 Guidelines:
-- Include cities, countries, regions, rivers, mountains, and historical place names.
 - Do NOT include relational adjectives derived from place names (e.g. "British", "Persian").
-- Do NOT include dynasty or period names used as time references (e.g. "T'ang period").
 - If no toponyms are found, return an empty array.
 - Return ONLY a valid JSON array of strings. No explanation, no markdown.
 
@@ -36,9 +34,6 @@ Output: ["Germany", "Britain"]
 
 Input: It brought in 4275 tonnes of British mutton from Ireland, some 10 percent of overall imports.
 Output: ["Ireland"]
-
-Input: The plant was first mentioned in the T'ang period as growing in the country Hi, and came from Ñan-tuñ in Korea.
-Output: ["Hi", "Ñan-tuñ", "Korea"]
 
 Text:
 {text}"""
