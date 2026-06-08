@@ -21,12 +21,7 @@ from openai import OpenAI
 PROMPT = """\
 You are an accurate Named Entity Recognition system specialized in toponym extraction.
 
-Your task: identify all place names (toponyms) in the text below.
-
-Guidelines:
-- Do NOT include relational adjectives derived from place names (e.g. "British", "Persian").
-- If no toponyms are found, return an empty array.
-- Return ONLY a valid JSON array of strings. No explanation, no markdown.
+Your task: identify all place names (toponyms) in the text below. Return ONLY a valid JSON array of strings. No explanation, no markdown.
 
 Examples:
 Input: Germany imported 47600 sheep from Britain last year.
