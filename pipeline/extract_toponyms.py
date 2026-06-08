@@ -19,10 +19,26 @@ import networkx as nx
 from openai import OpenAI
 
 PROMPT = """\
-Extract all place names (toponyms) from the text below.
+You are an accurate Named Entity Recognition system specialized in toponym extraction.
 
-If no toponyms are found, return an empty array [].
-Return ONLY a JSON array of strings, one toponym per item, no explanation.
+Your task: identify all place names (toponyms) in the text below.
+
+Guidelines:
+- Include cities, countries, regions, rivers, mountains, and historical place names.
+- Do NOT include relational adjectives derived from place names (e.g. "British", "Persian").
+- Do NOT include dynasty or period names used as time references (e.g. "T'ang period").
+- If no toponyms are found, return an empty array.
+- Return ONLY a valid JSON array of strings. No explanation, no markdown.
+
+Examples:
+Input: Germany imported 47600 sheep from Britain last year.
+Output: ["Germany", "Britain"]
+
+Input: It brought in 4275 tonnes of British mutton from Ireland, some 10 percent of overall imports.
+Output: ["Ireland"]
+
+Input: In the T'ang period, several Indian and Persian texts were translated.
+Output: []
 
 Text:
 {text}"""
