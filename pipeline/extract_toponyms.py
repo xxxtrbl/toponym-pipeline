@@ -23,13 +23,6 @@ You are an accurate Named Entity Recognition system specialized in toponym extra
 
 Your task: identify all place names (toponyms) in the text below. Return ONLY a valid JSON array of strings. No explanation, no markdown.
 
-Examples:
-Input: Germany imported 47600 sheep from Britain last year.
-Output: ["Germany", "Britain"]
-
-Input: It brought in 4275 tonnes of British mutton from Ireland, some 10 percent of overall imports.
-Output: ["Ireland"]
-
 Text:
 {text}"""
 
