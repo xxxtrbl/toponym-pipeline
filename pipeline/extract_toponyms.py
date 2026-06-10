@@ -31,32 +31,6 @@ VERIFY_PROMPT = """\
 Is the bracketed term used as a place name in the following text?
 Answer only "yes" or "no", no explanation.
 
-Guidelines:
-- Include cities, countries, regions, rivers, mountains, and historical place names.
-- Do NOT include relational adjectives derived from place names (e.g. "Turkish", "Chinese").
-- Do NOT include dynasty or period names used as time references (e.g. "T'ang", "Tsin").
-
-Examples:
-Text: ...[Germany] imported 47600 sheep from Britain last year....
-Term: [Germany]
-Answer: yes
-
-Text: ...It brought in 4275 tonnes of [British] mutton from Ireland, some 10 percent of overall imports....
-Term: [British]
-Answer: no
-
-Text: ...In the T'ang period the [Chinese] learned that the people of Fu-lin relished grape-wine....
-Term: [Chinese]
-Answer: no
-
-Text: ...In the [T'ang] period, several Indian and Persian texts were translated....
-Term: [T'ang]
-Answer: no
-
-Text: ...In the T'ang period the Chinese learned that the people of [Fu-lin] relished grape-wine, and that Turkistan had fallen into the hands of Turkish tribes....
-Term: [Fu-lin]
-Answer: yes
-
 Text: {context}
 Term: [{candidate}]"""
 
@@ -196,6 +170,7 @@ def process_page(page: dict, client: OpenAI, model: str) -> tuple[list[str], lis
 
 
 def main():
+    print("VERSION: 20260610-v6-verify-add-examples")
     parser = argparse.ArgumentParser(description="Zero-shot toponym extraction (Iteration 1)")
     parser.add_argument("--input", required=True, help="Path to ocr.ndjson")
     parser.add_argument("--output", required=True, help="Output folder")
