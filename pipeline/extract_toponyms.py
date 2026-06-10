@@ -18,20 +18,32 @@ import os
 import networkx as nx
 from openai import OpenAI
 
-PROMPT = """\
-You are an accurate Named Entity Recognition system specialized in toponym extraction.
+PROMPT = """You are an accurate Named Entity Recognition system specialized in toponym extraction.
 
-Your task: identify all place names (toponyms) in the text below. Return ONLY a valid JSON array of strings. No explanation, no markdown.
+Your task: identify all place names (toponyms) in the text below.
+
+Guidelines:
+- Include cities, countries, regions, rivers, mountains, and historical place names.
+- Do NOT include relational adjectives derived from place names (e.g. "Turkish", "Chinese").
+- Do NOT include dynasty or period names used as time references (e.g. "T'ang", "Tsin").
+- If no toponyms are found, return an empty array.
+- Return ONLY a valid JSON array of strings. No explanation, no markdown.
+
+Examples:
+Input: Germany imported 47600 sheep from Britain last year.
+Output: ["Germany", "Britain"]
+
+Input: It brought in 4275 tonnes of British mutton from Ireland, some 10 percent of overall imports.
+Output: ["Ireland"]
+
+Input: In the T'ang period, several Indian and Persian texts were translated.
+Output: []
+
+Input: In the T'ang period the Chinese learned that the people of Fu-lin relished grape-wine, and that Turkistan had fallen into the hands of Turkish tribes.
+Output: ["Fu-lin", "Turkistan"]
 
 Text:
 {text}"""
-
-VERIFY_PROMPT = """\
-Is the bracketed term used as a place name in the following text?
-Answer only "yes" or "no", no explanation.
-
-Text: {context}
-Term: [{candidate}]"""
 
 CONTEXT_CHARS = 150
 GRAPH_FREQ_THRESHOLD = 0.15  # exclude toponyms appearing on more than this fraction of pages from the graph
@@ -121,35 +133,13 @@ def find_in_text(text: str, candidate: str) -> int | None:
     return match.start() if match else None
 
 
-def get_context(text: str, position: int, length: int) -> str:
-    start = max(0, position - CONTEXT_CHARS)
-    end = min(len(text), position + length + CONTEXT_CHARS)
-    return f"...{text[start:position]}[{text[position:position+length]}]{text[position+length:end]}..."
-
-
-def verify_toponym(candidate: str, context: str, client: OpenAI, model: str) -> bool:
-    prompt = VERIFY_PROMPT.format(context=context, candidate=candidate)
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-        max_tokens=16,
-    )
-    return response.choices[0].message.content.strip().lower().startswith("yes")
-
-
-def filter_with_context(candidates: list[str], text: str, client: OpenAI, model: str) -> tuple[list[str], list[str]]:
+def filter_with_context(candidates: list[str], text: str) -> tuple[list[str], list[str]]:
     confirmed, rejected = [], []
     for candidate in candidates:
-        pos = find_in_text(text, candidate)
-        if pos is None:
+        if find_in_text(text, candidate) is None:
             rejected.append(candidate)  # hallucination — not in source text
-            continue
-        context = get_context(text, pos, len(candidate))
-        if verify_toponym(candidate, context, client, model):
-            confirmed.append(candidate)
         else:
-            rejected.append(candidate)
+            confirmed.append(candidate)
     return confirmed, rejected
 
 
@@ -165,10 +155,11 @@ def process_page(page: dict, client: OpenAI, model: str) -> tuple[list[str], lis
         max_tokens=512,
     )
     raw = parse_toponyms(response.choices[0].message.content)
-    return filter_with_context(raw, text, client, model)
+    return filter_with_context(raw, text)
 
 
 def main():
+    print("VERSION: 20260610-v5-removed-llm-verify")
     parser = argparse.ArgumentParser(description="Zero-shot toponym extraction (Iteration 1)")
     parser.add_argument("--input", required=True, help="Path to ocr.ndjson")
     parser.add_argument("--output", required=True, help="Output folder")

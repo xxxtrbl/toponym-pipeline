@@ -42,7 +42,7 @@
   ],
   "III-5-C-22--V-1_page0015": [
     "Persia",
-    "Sino-Iranian",
+    "?Sino-Iranian",
     "China",
     "Europe",
     "#Iran",
@@ -152,7 +152,8 @@
     "Persia",
     "Iran",
     "#Malayan region",
-    "#Central Asia"
+    "#Central Asia",
+    "#Midie"
   ],
   "III-5-C-22--V-1_page0030": [
     "Europe",
@@ -161,7 +162,7 @@
     "Rome",
     "India",
     "Annam",
-    "Malayans",
+    "?Malayans",
     "Japan",
     "?T'ang period",
     "?Hu pen ts'ao",
@@ -206,8 +207,7 @@
     "Baluchistan",
     "Kashmir",
     "Media",
-    "Armenian",
-    "Kashmir.¹",
+    "?Armenian",
     "Iran",
     "India",
     "#Asia Minor",
@@ -240,11 +240,11 @@
     "#China"
   ],
   "III-5-C-22--V-1_page0039": [
-    "Sariqoli",
-    "Pamir",
-    "Waxi",
+    "?Sariqoli",
+    "?Pamir",
+    "?Waxi",
     "Fergana",
-    "Osmanli",
+    "?Osmanli",
     "Iran"
   ],
   "III-5-C-22--V-1_page0040": [],
@@ -345,9 +345,8 @@
   "III-5-C-22--V-1_page0050": [
     "Persia",
     "Syria",
-    "Chalybonian",
+    "?Chalybonian",
     "Damascus",
-    "?Šāhnāmeh",
-    "#Massagetae"
+    "?Šāhnāmeh"
   ]
 }
