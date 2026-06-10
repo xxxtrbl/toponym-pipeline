@@ -29,6 +29,32 @@ VERIFY_PROMPT = """\
 Is the bracketed term a place name (city, region, river, kingdom) used as a noun — not an adjective or demonym — in the following text?
 Answer only "yes" or "no".
 
+Guidelines:
+- Include cities, countries, regions, rivers, mountains, and historical place names.
+- Do NOT include relational adjectives derived from place names (e.g. "Turkish", "Chinese").
+- Do NOT include dynasty or period names used as time references (e.g. "T'ang", "Tsin").
+
+Examples:
+Text: ...[Germany] imported 47600 sheep from Britain last year....
+Bracketed term: [Germany]
+Answer: yes
+
+Text: ...It brought in 4275 tonnes of [British] mutton from Ireland, some 10 percent of overall imports....
+Bracketed term: [British]
+Answer: no
+
+Text: ...In the T'ang period the [Chinese] learned that the people of Fu-lin relished grape-wine....
+Bracketed term: [Chinese]
+Answer: no
+
+Text: ...In the [T'ang] period, several Indian and Persian texts were translated....
+Bracketed term: [T'ang]
+Answer: no
+
+Text: ...In the T'ang period the Chinese learned that the people of [Fu-lin] relished grape-wine, and that Turkistan had fallen into the hands of Turkish tribes....
+Bracketed term: [Fu-lin]
+Answer: yes
+
 Text: {context}
 
 Bracketed term: [{candidate}]"""
@@ -161,6 +187,7 @@ def verify_candidate(candidate: str, context: str, client: OpenAI, model: str) -
 
 
 def main():
+    print("VERSION: 20260610-v7-verify-add-examples")
     parser = argparse.ArgumentParser(description="Iteration 2: co-occurrence guided extraction")
     parser.add_argument("--input", required=True, help="Path to ocr.ndjson")
     parser.add_argument("--iter1", required=True, help="Folder with Iteration 1 output")
