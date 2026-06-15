@@ -8,12 +8,10 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import sys
-from collections import Counter
 from pathlib import Path
-
-import os
 
 import networkx as nx
 from openai import OpenAI
@@ -28,14 +26,15 @@ Text:
 {text}"""
 
 VERIFY_PROMPT = """\
-Is the bracketed term used as a place name in the following text?
+Is the bracketed term used as a place name (country, city, region, river, or historical territory) in the following text?
+Answer yes for geographic names used in any sense — including historical or general references.
+Answer no for adjectives, demonyms (e.g. Chinese, Persian, Indian), dynasty names, or language names.
 Answer only "yes" or "no", no explanation.
 
 Text: {context}
-Term: [{candidate}]"""
+Answer:"""
 
 CONTEXT_CHARS = 150
-GRAPH_FREQ_THRESHOLD = 0.15  # exclude toponyms appearing on more than this fraction of pages from the graph
 
 
 def parse_page_range(s: str) -> tuple[int, int]:
@@ -128,8 +127,8 @@ def get_context(text: str, position: int, length: int) -> str:
     return f"...{text[start:position]}[{text[position:position+length]}]{text[position+length:end]}..."
 
 
-def verify_toponym(candidate: str, context: str, client: OpenAI, model: str) -> bool:
-    prompt = VERIFY_PROMPT.format(context=context, candidate=candidate)
+def verify_toponym(context: str, client: OpenAI, model: str) -> bool:
+    prompt = VERIFY_PROMPT.format(context=context)
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
@@ -147,7 +146,7 @@ def filter_with_context(candidates: list[str], text: str, client: OpenAI, model:
             rejected.append(candidate)  # hallucination — not in source text
             continue
         context = get_context(text, pos, len(candidate))
-        if verify_toponym(candidate, context, client, model):
+        if verify_toponym(context, client, model):
             confirmed.append(candidate)
         else:
             rejected.append(candidate)
@@ -155,7 +154,7 @@ def filter_with_context(candidates: list[str], text: str, client: OpenAI, model:
 
 
 def process_page(page: dict, client: OpenAI, model: str) -> tuple[list[str], list[str]]:
-    text = preprocess_text(page.get("body_text", "").strip())
+    text = preprocess_text(page.get("full_text", "").strip())
     if not text or text == "(empty)":
         return [], []
     prompt = PROMPT.format(text=text)
@@ -225,24 +224,11 @@ def main():
     with open(output_dir / "page_toponyms.json", "w", encoding="utf-8") as f:
         json.dump(page_toponyms, f, ensure_ascii=False, indent=2)
 
-    # Frequency filter: count how many pages each toponym appears on
-    page_freq: Counter = Counter()
-    for toponyms in page_toponyms.values():
-        for t in set(toponyms):
-            page_freq[t] += 1
-
-    threshold_count = i * GRAPH_FREQ_THRESHOLD
-    high_freq = {t for t, count in page_freq.items() if count > threshold_count}
-    if high_freq:
-        print(f"\nExcluding {len(high_freq)} high-frequency toponyms from graph "
-              f"(>{GRAPH_FREQ_THRESHOLD * 100:.0f}% of pages): {sorted(high_freq)}")
-
-    # Pass 2: build co-occurrence graph excluding high-frequency toponyms
+    # Pass 2: build co-occurrence graph
     G = nx.Graph()
     for toponyms in page_toponyms.values():
-        filtered = [t for t in toponyms if t not in high_freq]
-        for j, t1 in enumerate(filtered):
-            for t2 in filtered[j + 1:]:
+        for j, t1 in enumerate(toponyms):
+            for t2 in toponyms[j + 1:]:
                 if t1 != t2:
                     if G.has_edge(t1, t2):
                         G[t1][t2]["weight"] += 1
@@ -252,8 +238,17 @@ def main():
     nx.write_gexf(G, output_dir / "cooccurrence_graph.gexf")
 
     total = sum(len(v) for v in page_toponyms.values())
-    print(f"\nDone. {i} pages processed, {total} total extractions, {G.number_of_nodes()} unique toponyms in graph.")
+    unique = G.number_of_nodes()
+    print(f"\nDone. {i} pages processed, {total} total extractions, {unique} unique toponyms in graph.")
     print(f"Results saved to {output_dir}/")
+
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        log_file.write(json.dumps({
+            "summary": True,
+            "pages_processed": i,
+            "total_extractions": total,
+            "unique_toponyms": unique,
+        }, ensure_ascii=False) + "\n")
 
 
 if __name__ == "__main__":

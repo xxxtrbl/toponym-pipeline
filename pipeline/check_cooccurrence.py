@@ -13,11 +13,10 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
-
-import os
 
 import networkx as nx
 from openai import OpenAI
@@ -26,24 +25,14 @@ from rapidfuzz.distance import Levenshtein
 CONTEXT_CHARS = 150
 
 VERIFY_PROMPT = """\
-Is the bracketed term a place name (city, region, river, kingdom) used as a noun — not an adjective or demonym — in the following text?
-Answer only "yes" or "no".
+We are looking for the toponym "{predicted_toponym}" in the text below.
+Is the bracketed term a valid mention of "{predicted_toponym}"?
+Answer yes if it refers to the same place, including different romanizations, historical name variants, or minor OCR errors.
+Answer no if it is a different word, an adjective, or unrelated to "{predicted_toponym}".
+Answer only "yes" or "no", no explanation.
 
-Text: {context}
+Text: {context}"""
 
-Bracketed term: [{candidate}]"""
-
-
-_ADJ_DEMONYM_SUFFIXES = ('ian', 'ians', 'ese', 'ish')
-_PERIOD_WORDS = {'period', 'dynasty', 'era', 'age'}
-
-
-def should_skip_predicted(toponym: str) -> bool:
-    t = toponym.lower()
-    if any(t.endswith(s) for s in _ADJ_DEMONYM_SUFFIXES):
-        return True
-    last_word = t.rsplit(None, 1)[-1]
-    return last_word in _PERIOD_WORDS
 
 
 def preprocess_text(text: str) -> str:
@@ -149,8 +138,8 @@ def get_context(text: str, position: int, length: int) -> str:
     return f"...{before}[{text[position:position+length]}]{after}..."
 
 
-def verify_candidate(candidate: str, context: str, client: OpenAI, model: str) -> bool:
-    prompt = VERIFY_PROMPT.format(context=context, candidate=candidate)
+def verify_candidate(context: str, predicted_toponym: str, client: OpenAI, model: str) -> bool:
+    prompt = VERIFY_PROMPT.format(context=context, predicted_toponym=predicted_toponym)
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
@@ -208,7 +197,7 @@ def main():
                 print(f"  [{i+1}/{len(pages_to_process)}] {page_id}: not found in ndjson, skipping")
                 continue
 
-            text = preprocess_text(page.get("body_text", "").strip())
+            text = preprocess_text(page.get("full_text", "").strip())
             if not text:
                 continue
 
@@ -218,49 +207,47 @@ def main():
                 if G.has_node(toponym):
                     predicted.update(G.neighbors(toponym))
             predicted -= set(found_toponyms)
-            predicted = {t for t in predicted if not should_skip_predicted(t)}
 
             if not predicted:
                 continue
 
             # Fuzzy search + LLM verification
-            newly_confirmed = []
+            newly_confirmed = []       # list of "candidate -> predicted_toponym" strings (for page_toponyms)
+            confirmed_canonical = []   # list of predicted_toponym strings (for graph update)
+            seen = {strip_punctuation(t).lower() for t in found_toponyms}
             for predicted_toponym in predicted:
                 variants = expand_variants(predicted_toponym)
                 found = False
                 for variant in variants:
                     candidates = fuzzy_search(text, variant)
                     for candidate in candidates:
+                        candidate_text = strip_punctuation(candidate["text"])
+                        if candidate_text.lower() in seen:
+                            found = True
+                            break
                         context = get_context(text, candidate["position"], len(candidate["text"]))
-                        if verify_candidate(candidate["text"], context, client, args.model):
-                            newly_confirmed.append(strip_punctuation(candidate["text"]))
+                        if verify_candidate(context, predicted_toponym, client, args.model):
+                            newly_confirmed.append(f"{candidate_text} -> {predicted_toponym}")
+                            confirmed_canonical.append(predicted_toponym)
+                            seen.add(candidate_text.lower())
                             found = True
                             break
                     if found:
                         break
 
-            # Deduplicate against iter1 results
             if newly_confirmed:
-                seen = {strip_punctuation(t).lower() for t in found_toponyms}
-                deduped = []
-                for t in newly_confirmed:
-                    t_lower = t.lower()
-                    if not any(t_lower in s or t_lower == s for s in seen):
-                        seen.add(t_lower)
-                        deduped.append(t)
-                newly_confirmed = deduped
-
-            if newly_confirmed:
-                all_toponyms = found_toponyms + newly_confirmed
                 updated_page_toponyms[page_id] = found_toponyms + newly_confirmed
-                for j, t1 in enumerate(newly_confirmed):
-                    for t2 in all_toponyms[j + 1:]:
+                total_recovered += len(newly_confirmed)
+
+                # Update co-occurrence graph with canonical forms
+                all_canonical = found_toponyms + confirmed_canonical
+                for t1 in confirmed_canonical:
+                    for t2 in all_canonical:
                         if t1 != t2:
                             if G.has_edge(t1, t2):
                                 G[t1][t2]["weight"] += 1
                             else:
                                 G.add_edge(t1, t2, weight=1)
-                total_recovered += len(newly_confirmed)
 
             log_entry = {
                 "page_id": page_id,
@@ -281,6 +268,14 @@ def main():
 
     print(f"\nDone. {total_recovered} new toponyms recovered across {len(pages_to_process)} pages.")
     print(f"Results saved to {output_dir}/")
+
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        log_file.write(json.dumps({
+            "summary": True,
+            "pages_processed": len(pages_to_process),
+            "new_toponyms_recovered": total_recovered,
+            "unique_toponyms": G.number_of_nodes(),
+        }, ensure_ascii=False) + "\n")
 
 
 if __name__ == "__main__":
