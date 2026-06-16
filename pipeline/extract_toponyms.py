@@ -26,10 +26,24 @@ Text:
 {text}"""
 
 VERIFY_PROMPT = """\
-Is the bracketed term used as a place name (country, city, region, river, or historical territory) in the following text?
-Answer yes for geographic names used in any sense — including historical or general references.
-Answer no for adjectives, demonyms (e.g. Chinese, Persian, Indian), dynasty names, or language names.
+Is the bracketed term used as a place name in the following text?
 Answer only "yes" or "no", no explanation.
+
+Examples:
+Text: ...[Germany] imported 47600 sheep from Britain last year....
+Answer: yes
+
+Text: ...traded goods from [China] to the west along the Silk Road....
+Answer: yes
+
+Text: ...In the T'ang period the Chinese learned that the people of [Fu-lin] relished grape-wine....
+Answer: yes
+
+Text: ...In the T'ang period the [Chinese] learned that the people of Fu-lin relished grape-wine....
+Answer: no
+
+Text: ...In the [T'ang] period, several Indian and Persian texts were translated....
+Answer: no
 
 Text: {context}
 Answer:"""
@@ -178,6 +192,7 @@ def main():
     parser.add_argument("--limit", type=int, default=None, help="Max number of pages to process")
     parser.add_argument("--model", default="qwen3-72b", help="Model name served by vLLM")
     args = parser.parse_args()
+    print("Iteration 1 - v10: zero-shot extraction with few-shot verify prompt")
 
     client = OpenAI(
         base_url=os.environ.get("VLLM_BASE_URL", "http://localhost:8080/v1"),
