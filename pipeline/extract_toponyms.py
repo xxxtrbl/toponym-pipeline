@@ -27,6 +27,10 @@ Text:
 
 VERIFY_PROMPT = """\
 Is the bracketed term used as a place name in the following text?
+Guidelines:
+- Include cities, countries, regions, rivers, mountains, and historical place names.
+- Do NOT include relational adjectives derived from place names (e.g. "Turkish", "Chinese").
+- Do NOT include dynasty or period names used as time references (e.g. "T'ang", "Tsin").
 Answer only "yes" or "no", no explanation.
 
 Examples:
@@ -131,7 +135,7 @@ def parse_toponyms(response: str) -> list[str]:
 
 
 def find_in_text(text: str, candidate: str) -> int | None:
-    match = re.search(re.escape(candidate), text, re.IGNORECASE)
+    match = re.search(r'\b' + re.escape(candidate) + r'\b', text, re.IGNORECASE)
     return match.start() if match else None
 
 
@@ -152,25 +156,25 @@ def verify_toponym(context: str, client: OpenAI, model: str) -> bool:
     return response.choices[0].message.content.strip().lower().startswith("yes")
 
 
-def filter_with_context(candidates: list[str], text: str, client: OpenAI, model: str) -> tuple[list[str], list[str]]:
-    confirmed, rejected = [], []
+def filter_with_context(candidates: list[str], text: str, client: OpenAI, model: str) -> tuple[list[str], list[str], list[str]]:
+    confirmed, not_found, rejected = [], [], []
     for candidate in candidates:
         pos = find_in_text(text, candidate)
         if pos is None:
-            rejected.append(candidate)  # hallucination — not in source text
+            not_found.append(candidate)
             continue
         context = get_context(text, pos, len(candidate))
         if verify_toponym(context, client, model):
             confirmed.append(candidate)
         else:
             rejected.append(candidate)
-    return confirmed, rejected
+    return confirmed, not_found, rejected
 
 
-def process_page(page: dict, client: OpenAI, model: str) -> tuple[list[str], list[str]]:
+def process_page(page: dict, client: OpenAI, model: str) -> tuple[list[str], list[str], list[str]]:
     text = preprocess_text(page.get("full_text", "").strip())
     if not text or text == "(empty)":
-        return [], []
+        return [], [], []
     prompt = PROMPT.format(text=text)
     response = client.chat.completions.create(
         model=model,
@@ -192,7 +196,7 @@ def main():
     parser.add_argument("--limit", type=int, default=None, help="Max number of pages to process")
     parser.add_argument("--model", default="qwen3-72b", help="Model name served by vLLM")
     args = parser.parse_args()
-    print("Iteration 1 - v10: zero-shot extraction with few-shot verify prompt")
+    print("Iteration 1 - v12: added guidelines to verify prompt")
 
     client = OpenAI(
         base_url=os.environ.get("VLLM_BASE_URL", "http://localhost:8080/v1"),
@@ -217,7 +221,7 @@ def main():
             page_id = page.get("custom_id", f"page_{i}")
 
             try:
-                toponyms, rejected = process_page(page, client, args.model)
+                toponyms, not_found, rejected = process_page(page, client, args.model)
             except Exception as e:
                 print(f"  [{i}] ERROR {page_id}: {e}", file=sys.stderr)
                 continue
@@ -229,6 +233,7 @@ def main():
                 "language": page.get("language"),
                 "toponym_count": len(toponyms),
                 "toponyms": toponyms,
+                "not_found": not_found,
                 "rejected": rejected,
             }
             log_file.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
