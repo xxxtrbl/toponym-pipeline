@@ -8,6 +8,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -224,7 +225,7 @@ def main():
     with open(output_dir / "page_toponyms.json", "w", encoding="utf-8") as f:
         json.dump(page_toponyms, f, ensure_ascii=False, indent=2)
 
-    # Pass 2: build co-occurrence graph
+    # Pass 2: build co-occurrence graph with raw counts
     G = nx.Graph()
     for toponyms in page_toponyms.values():
         for j, t1 in enumerate(toponyms):
@@ -234,6 +235,25 @@ def main():
                         G[t1][t2]["weight"] += 1
                     else:
                         G.add_edge(t1, t2, weight=1)
+
+    # Pass 3: reweight edges with NPMI
+    N = len(page_toponyms)
+    node_count = {}
+    for toponyms in page_toponyms.values():
+        for t in toponyms:
+            node_count[t] = node_count.get(t, 0) + 1
+
+    for u, v, d in G.edges(data=True):
+        cocount = d["weight"]
+        pu = node_count.get(u, 0) / N
+        pv = node_count.get(v, 0) / N
+        puv = cocount / N
+        if pu > 0 and pv > 0 and puv > 0:
+            pmi = math.log2(puv / (pu * pv))
+            npmi = pmi / -math.log2(puv)
+        else:
+            npmi = -1.0
+        G[u][v]["weight"] = round(npmi, 4)
 
     nx.write_gexf(G, output_dir / "cooccurrence_graph.gexf")
 
