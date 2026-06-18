@@ -25,11 +25,23 @@ from rapidfuzz.distance import Levenshtein
 CONTEXT_CHARS = 150
 
 VERIFY_PROMPT = """\
-We are looking for the toponym "{predicted_toponym}" in the text below.
-Is the bracketed term a valid mention of "{predicted_toponym}"?
-Answer yes if it refers to the same place, including different romanizations, historical name variants, or minor OCR errors.
-Answer no if it is a different word, an adjective, or unrelated to "{predicted_toponym}".
-Answer only "yes" or "no", no explanation.
+We predicted the toponym "{predicted_toponym}" appears on this page.
+Is the bracketed term a reference to this place — including OCR errors, spelling variants, or different romanizations?
+Answer no if it is an adjective, a demonym, or a completely different place.
+Answer only "yes" or "no".
+
+Examples:
+Predicted: "Yünnan"
+Text: ...The fig of [Yün-nan] deserves special mention. Wu K'i-tsün, author of the excellent botanical work Či wu miṅ ši t'u k'ao...
+Answer: yes
+
+Predicted: "Persia"
+Text: ...The most important of the [Persian] works on pharmacology is the Kitāb-ul-abniyat...
+Answer: no
+
+Predicted: "Ts'i"
+Text: ...written by [Ts'ui] Pao in the middle of the fourth century, states, "The leaves of yen-či...
+Answer: no
 
 Text: {context}"""
 
@@ -69,6 +81,18 @@ def edit_distance_threshold(length: int) -> int:
     if length <= 8:
         return 2
     return 3
+
+
+_FUNCTION_WORDS = {'and', 'or', 'as', 'the', 'of', 'in', 'from', 'to', 'a', 'an'}
+
+
+def strip_function_words(s: str) -> str:
+    words = s.split()
+    while words and words[-1].lower() in _FUNCTION_WORDS:
+        words.pop()
+    while words and words[0].lower() in _FUNCTION_WORDS:
+        words.pop(0)
+    return ' '.join(words)
 
 
 def get_word_ngrams(text: str, n: int) -> list[tuple[int, str]]:
@@ -117,7 +141,7 @@ def expand_variants(toponym: str) -> list[str]:
 def fuzzy_search(text: str, toponym: str) -> list[dict]:
     threshold = edit_distance_threshold(len(toponym))
     n_words = len(toponym.split())
-    ngrams = get_word_ngrams(text, n_words)
+    ngrams = get_word_ngrams(text, n_words) 
 
     candidates = []
     seen = set()
@@ -157,6 +181,7 @@ def main():
     parser.add_argument("--model", default="qwen3-72b", help="Model name served by vLLM")
     parser.add_argument("--limit", type=int, default=None, help="Max pages to process")
     args = parser.parse_args()
+    print("Iteration 2 - v14: targeted verify prompt — checks candidate against predicted toponym only")
 
     client = OpenAI(
         base_url=os.environ.get("VLLM_BASE_URL", "http://localhost:8080/v1"),
@@ -219,9 +244,11 @@ def main():
                 variants = expand_variants(predicted_toponym)
                 found = False
                 for variant in variants:
+                    if len(strip_punctuation(variant)) < 4:
+                        continue
                     candidates = fuzzy_search(text, variant)
                     for candidate in candidates:
-                        candidate_text = strip_punctuation(candidate["text"])
+                        candidate_text = strip_function_words(strip_punctuation(candidate["text"]))
                         if candidate_text.lower() in seen:
                             found = True
                             break

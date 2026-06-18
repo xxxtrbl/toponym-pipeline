@@ -196,7 +196,7 @@ def main():
     parser.add_argument("--limit", type=int, default=None, help="Max number of pages to process")
     parser.add_argument("--model", default="qwen3-72b", help="Model name served by vLLM")
     args = parser.parse_args()
-    print("Iteration 1 - v12: added guidelines to verify prompt")
+    print("Iteration 1 - v13: added few-shot examples to verify prompt")
 
     client = OpenAI(
         base_url=os.environ.get("VLLM_BASE_URL", "http://localhost:8080/v1"),
