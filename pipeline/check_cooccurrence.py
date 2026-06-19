@@ -2,10 +2,9 @@
 Iteration 2: Co-occurrence guided toponym extraction.
 
 For each page where Iteration 1 found at least one toponym:
-  1. Predict candidate toponyms via co-occurrence graph
-  2. Fuzzy search for each predicted toponym in the page text
-  3. LLM verification: is the candidate a place name in context?
-  4. Update page_toponyms and cooccurrence_graph with confirmed new toponyms
+  1. Predict candidate toponyms via co-occurrence graph (top-5 NPMI neighbors)
+  2. Single LLM call: given full page text + candidate list, extract confirmed toponyms
+  3. Update page_toponyms with newly confirmed toponyms
 
 Usage:
     python3 check_cooccurrence.py --input data/ocr.ndjson --iter1 output/ --output output_iter2/
@@ -13,26 +12,33 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import re
-import sys
 from pathlib import Path
 
 import networkx as nx
 from openai import OpenAI
-from rapidfuzz.distance import Levenshtein
 
-CONTEXT_CHARS = 150
+EXTRACT_PROMPT = """\
+You are an expert at recovering place names from historical texts. \
+A previous extraction pass found some toponyms in this page, and based on co-occurrence patterns \
+in the corpus, the following place names are predicted to also appear on this page. \
+They may have been overlooked due to OCR errors, unfamiliar romanizations, spelling variants, \
+or insufficient local context.
 
-VERIFY_PROMPT = """\
-We are looking for the toponym "{predicted_toponym}" in the text below.
-Is the bracketed term a valid mention of "{predicted_toponym}"?
-Answer yes if it refers to the same place, including different romanizations, historical name variants, or minor OCR errors.
-Answer no if it is a different word, an adjective, or unrelated to "{predicted_toponym}".
-Answer only "yes" or "no", no explanation.
+Candidate list (toponyms predicted to appear):
+{candidates}
 
-Text: {context}"""
+Carefully read the text below and identify which of the candidates actually appear — \
+as nouns referring to a place, including OCR-distorted or alternate-romanized forms. \
+Do NOT include adjectives or demonyms (e.g. "Persian", "Chinese").
+Return ONLY a JSON array of strings in the format "actual text found -> candidate name". \
+Use the exact surface form from the text on the left and the canonical candidate name on the right. \
+If none are found, return [].
 
+Text:
+{text}"""
 
 
 def preprocess_text(text: str) -> str:
@@ -59,94 +65,39 @@ def load_pages_from_ndjson(ndjson_path: str, page_ids: set[str]) -> dict[str, di
             if cid in page_ids:
                 pages[cid] = rec
             if len(pages) == len(page_ids):
-                break  # found everything we need
+                break
     return pages
 
 
-def edit_distance_threshold(length: int) -> int:
-    if length < 5:
-        return 1
-    if length <= 8:
-        return 2
-    return 3
+def parse_matches(response: str) -> list[str]:
+    """Parse LLM response into list of 'found -> candidate' strings."""
+    match = re.search(r"\[.*?\]", response, re.DOTALL)
+    if not match:
+        return []
+    try:
+        items = json.loads(match.group())
+        result = []
+        for item in items:
+            if not isinstance(item, str):
+                continue
+            item = item.strip()
+            if " -> " in item:
+                result.append(item)
+        return result
+    except json.JSONDecodeError:
+        return []
 
 
-def get_word_ngrams(text: str, n: int) -> list[tuple[int, str]]:
-    words = list(re.finditer(r'\S+', text))
-    ngrams = []
-    for i in range(len(words) - n + 1):
-        span_words = words[i:i + n]
-        start = span_words[0].start()
-        ngram = text[start:span_words[-1].end()]
-        ngrams.append((start, ngram))
-    return ngrams
-
-
-def strip_punctuation(s: str) -> str:
-    return re.sub(r'^[\W_]+|[\W_]+$', '', s, flags=re.UNICODE).strip()
-
-
-def expand_variants(toponym: str) -> list[str]:
-    """Split compound toponyms into individual searchable variants.
-
-    Examples:
-      "Mouru (Muru, Merw)"  → ["Mouru", "Muru", "Merw"]
-      "An-si (Parthia)"     → ["An-si", "Parthia"]
-      "Fergana"             → ["Fergana"]
-    """
-    if '(' not in toponym and ' or ' not in toponym:
-        return [toponym]
-    variants = []
-    for part in toponym.split(' or '):
-        part = part.strip()
-        m = re.match(r'^(.*?)\s*\(([^)]+)\)$', part)
-        if m:
-            main = m.group(1).strip()
-            if main:
-                variants.append(main)
-            for v in m.group(2).split(','):
-                v = v.strip()
-                if v:
-                    variants.append(v)
-        else:
-            if part:
-                variants.append(part)
-    return variants
-
-
-def fuzzy_search(text: str, toponym: str) -> list[dict]:
-    threshold = edit_distance_threshold(len(toponym))
-    n_words = len(toponym.split())
-    ngrams = get_word_ngrams(text, n_words)
-
-    candidates = []
-    seen = set()
-    for pos, ngram in ngrams:
-        dist = Levenshtein.distance(toponym.lower(), ngram.lower())
-        if dist <= threshold and ngram.lower() not in seen:
-            seen.add(ngram.lower())
-            candidates.append({"text": ngram, "position": pos, "distance": dist})
-
-    return sorted(candidates, key=lambda x: x["distance"])
-
-
-def get_context(text: str, position: int, length: int) -> str:
-    start = max(0, position - CONTEXT_CHARS)
-    end = min(len(text), position + length + CONTEXT_CHARS)
-    before = text[start:position]
-    after = text[position + length:end]
-    return f"...{before}[{text[position:position+length]}]{after}..."
-
-
-def verify_candidate(context: str, predicted_toponym: str, client: OpenAI, model: str) -> bool:
-    prompt = VERIFY_PROMPT.format(context=context, predicted_toponym=predicted_toponym)
+def extract_from_candidates(text: str, candidates: list[str], client: OpenAI, model: str) -> list[str]:
+    candidate_str = "\n".join(f"- {c}" for c in sorted(candidates))
+    prompt = EXTRACT_PROMPT.format(candidates=candidate_str, text=text)
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        max_tokens=16,
+        max_tokens=512,
     )
-    return response.choices[0].message.content.strip().lower().startswith("yes")
+    return parse_matches(response.choices[0].message.content)
 
 
 def main():
@@ -156,7 +107,10 @@ def main():
     parser.add_argument("--output", required=True, help="Output folder for Iteration 2 results")
     parser.add_argument("--model", default="qwen3-72b", help="Model name served by vLLM")
     parser.add_argument("--limit", type=int, default=None, help="Max pages to process")
+    parser.add_argument("--iteration", type=int, default=2, help="Current iteration number (for logging)")
     args = parser.parse_args()
+
+    print(f"Iteration {args.iteration} - v15: single LLM call per page with full text + candidate list")
 
     client = OpenAI(
         base_url=os.environ.get("VLLM_BASE_URL", "http://localhost:8080/v1"),
@@ -201,53 +155,35 @@ def main():
             if not text:
                 continue
 
-            # Co-occurrence prediction
+            # Co-occurrence prediction: top-5 NPMI neighbors per found toponym
             predicted = set()
             for toponym in found_toponyms:
                 if G.has_node(toponym):
-                    predicted.update(G.neighbors(toponym))
+                    neighbors = sorted(
+                        G.neighbors(toponym),
+                        key=lambda b: G[toponym][b]["weight"],
+                        reverse=True
+                    )
+                    predicted.update(neighbors[:5])
             predicted -= set(found_toponyms)
 
             if not predicted:
                 continue
 
-            # Fuzzy search + LLM verification
-            newly_confirmed = []       # list of "candidate -> predicted_toponym" strings (for page_toponyms)
-            confirmed_canonical = []   # list of predicted_toponym strings (for graph update)
-            seen = {strip_punctuation(t).lower() for t in found_toponyms}
-            for predicted_toponym in predicted:
-                variants = expand_variants(predicted_toponym)
-                found = False
-                for variant in variants:
-                    candidates = fuzzy_search(text, variant)
-                    for candidate in candidates:
-                        candidate_text = strip_punctuation(candidate["text"])
-                        if candidate_text.lower() in seen:
-                            found = True
-                            break
-                        context = get_context(text, candidate["position"], len(candidate["text"]))
-                        if verify_candidate(context, predicted_toponym, client, args.model):
-                            newly_confirmed.append(f"{candidate_text} -> {predicted_toponym}")
-                            confirmed_canonical.append(predicted_toponym)
-                            seen.add(candidate_text.lower())
-                            found = True
-                            break
-                    if found:
-                        break
+            # Single LLM call: extract confirmed candidates from full page text
+            confirmed = extract_from_candidates(text, list(predicted), client, args.model)
+
+            # Filter to only those whose candidate is not already in found_toponyms
+            found_lower = {t.lower() for t in found_toponyms}
+            newly_confirmed = [
+                item for item in confirmed
+                if item.split(" -> ", 1)[-1].strip().lower() not in found_lower
+            ]
 
             if newly_confirmed:
-                updated_page_toponyms[page_id] = found_toponyms + newly_confirmed
+                canonical_confirmed = [item.split(" -> ", 1)[-1].strip() for item in newly_confirmed]
+                updated_page_toponyms[page_id] = found_toponyms + canonical_confirmed
                 total_recovered += len(newly_confirmed)
-
-                # Update co-occurrence graph with canonical forms
-                all_canonical = found_toponyms + confirmed_canonical
-                for t1 in confirmed_canonical:
-                    for t2 in all_canonical:
-                        if t1 != t2:
-                            if G.has_edge(t1, t2):
-                                G[t1][t2]["weight"] += 1
-                            else:
-                                G.add_edge(t1, t2, weight=1)
 
             log_entry = {
                 "page_id": page_id,
@@ -264,7 +200,36 @@ def main():
     with open(output_dir / "page_toponyms.json", "w", encoding="utf-8") as f:
         json.dump(updated_page_toponyms, f, ensure_ascii=False, indent=2)
 
-    nx.write_gexf(G, output_dir / "cooccurrence_graph.gexf")
+    # Rebuild co-occurrence graph from updated_page_toponyms for next iteration
+    G_new = nx.Graph()
+    for toponyms in updated_page_toponyms.values():
+        for j, t1 in enumerate(toponyms):
+            for t2 in toponyms[j + 1:]:
+                if t1 != t2:
+                    if G_new.has_edge(t1, t2):
+                        G_new[t1][t2]["weight"] += 1
+                    else:
+                        G_new.add_edge(t1, t2, weight=1)
+
+    N = len(updated_page_toponyms)
+    node_count: dict[str, int] = {}
+    for toponyms in updated_page_toponyms.values():
+        for t in toponyms:
+            node_count[t] = node_count.get(t, 0) + 1
+
+    for u, v, d in G_new.edges(data=True):
+        cocount = d["weight"]
+        pu = node_count.get(u, 0) / N
+        pv = node_count.get(v, 0) / N
+        puv = cocount / N
+        if pu > 0 and pv > 0 and puv > 0:
+            pmi = math.log2(puv / (pu * pv))
+            npmi = pmi / -math.log2(puv)
+        else:
+            npmi = -1.0
+        G_new[u][v]["weight"] = round(npmi, 4)
+
+    nx.write_gexf(G_new, output_dir / "cooccurrence_graph.gexf")
 
     print(f"\nDone. {total_recovered} new toponyms recovered across {len(pages_to_process)} pages.")
     print(f"Results saved to {output_dir}/")
@@ -272,9 +237,9 @@ def main():
     with open(log_path, "a", encoding="utf-8") as log_file:
         log_file.write(json.dumps({
             "summary": True,
+            "iteration": args.iteration,
             "pages_processed": len(pages_to_process),
             "new_toponyms_recovered": total_recovered,
-            "unique_toponyms": G.number_of_nodes(),
         }, ensure_ascii=False) + "\n")
 
 
