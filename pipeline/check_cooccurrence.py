@@ -26,10 +26,7 @@ from rapidfuzz.distance import Levenshtein
 EXTRACT_PROMPT = """\
 You are an expert at identifying place names in historical texts.
 
-The following toponyms have already been confirmed on this page (for context only):
-{already_found}
-
-Based on co-occurrence patterns in the corpus, these additional toponyms are predicted to \
+Based on co-occurrence patterns in the corpus, the following place names are predicted to \
 also appear on this page — possibly in a variant spelling, different romanization, or \
 slightly distorted by OCR:
 {candidates}
@@ -42,8 +39,6 @@ Rules:
 - A candidate may appear as a romanization variant or with minor OCR errors — match by meaning.
 - Only confirm if the term is used as a place name (noun), not as an adjective or demonym \
 (e.g. "Persian", "Chinese", "Iranian").
-- Only include a match if you are confident it refers to the place.
-- Most candidates will not appear. Returning [] is perfectly fine.
 
 Return ONLY a JSON array in the format "surface text -> candidate name", or [] if none found.
 
@@ -121,17 +116,28 @@ def resolve_toponym(surface: str, canonical: str) -> str:
     return surface
 
 
-def extract_from_candidates(text: str, candidates: list[str], found: list[str], client: OpenAI, model: str) -> list[str]:
+def extract_from_candidates(text: str, candidates: list[str], client: OpenAI, model: str) -> list[str]:
     candidate_str = "\n".join(candidates)
-    found_str = "\n".join(found)
-    prompt = EXTRACT_PROMPT.format(already_found=found_str, candidates=candidate_str, text=text)
+    prompt = EXTRACT_PROMPT.format(candidates=candidate_str, text=text)
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        max_tokens=512,
+        max_tokens=1024,
     )
     return parse_matches(response.choices[0].message.content)
+
+
+def dedup_toponyms(toponyms: list[str]) -> list[str]:
+    unique = list(dict.fromkeys(toponyms))
+    lower = [t.lower() for t in unique]
+    return [
+        t for i, t in enumerate(unique)
+        if not any(
+            re.search(r'\b' + re.escape(lower[i]) + r'\b', lower[j])
+            for j in range(len(unique)) if j != i and lower[i] != lower[j]
+        )
+    ]
 
 
 def rebuild_graph(page_toponyms: dict[str, list[str]]) -> nx.Graph:
@@ -200,7 +206,7 @@ def process_one_iteration(
             continue
 
         try:
-            confirmed = extract_from_candidates(text, list(predicted), found_toponyms, client, model)
+            confirmed = extract_from_candidates(text, list(predicted), client, model)
         except Exception as e:
             print(f"  [{i+1}/{len(pages_to_process)}] ERROR {page_id}: {e}", file=sys.stderr)
             continue
@@ -212,10 +218,10 @@ def process_one_iteration(
         ]
 
         if newly_confirmed:
-            canonical_confirmed = [
+            canonical_confirmed = list(dict.fromkeys(
                 resolve_toponym(item.split(" -> ", 1)[0].strip(), item.split(" -> ", 1)[-1].strip())
                 for item in newly_confirmed
-            ]
+            ))
             updated_page_toponyms[page_id] = found_toponyms + canonical_confirmed
             total_recovered += len(newly_confirmed)
 
@@ -240,7 +246,7 @@ def main():
     parser.add_argument("--iter1", required=True, help="Folder with Iteration 1 output")
     parser.add_argument("--output", required=True, help="Output folder (overwritten each iteration)")
     parser.add_argument("--model", default="qwen3-72b", help="Model name served by vLLM")
-    parser.add_argument("--max-iter", type=int, default=15, help="Maximum number of iterations to run")
+    parser.add_argument("--max-iter", type=int, default=10, help="Maximum number of iterations to run")
     parser.add_argument("--limit", type=int, default=None, help="Max pages to process (for testing)")
     args = parser.parse_args()
 
@@ -281,6 +287,8 @@ def main():
             iterations_done += 1
 
             G = rebuild_graph(page_toponyms)
+
+            page_toponyms = {pid: dedup_toponyms(tops) for pid, tops in page_toponyms.items()}
 
             with open(output_dir / "page_toponyms.json", "w", encoding="utf-8") as f:
                 json.dump(page_toponyms, f, ensure_ascii=False, indent=2)
