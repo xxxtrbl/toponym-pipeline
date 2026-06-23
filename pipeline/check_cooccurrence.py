@@ -1,13 +1,14 @@
 """
-Iteration 2: Co-occurrence guided toponym extraction.
+Iterative co-occurrence guided toponym extraction (Iteration 2+).
 
-For each page where Iteration 1 found at least one toponym:
+For each page where the previous iteration found at least one toponym:
   1. Predict candidate toponyms via co-occurrence graph (top-5 NPMI neighbors)
   2. Single LLM call: given full page text + candidate list, extract confirmed toponyms
-  3. Update page_toponyms with newly confirmed toponyms
+  3. Update page_toponyms and rebuild the co-occurrence graph
+Repeats until no new toponyms are recovered or --max-iter is reached.
 
 Usage:
-    python3 check_cooccurrence.py --input data/ocr.ndjson --iter1 output/ --output output_iter2/
+    python3 check_cooccurrence.py --input data/ocr.ndjson --iter1 output/ --output output_itern/
 """
 
 import argparse
@@ -15,27 +16,36 @@ import json
 import math
 import os
 import re
+import sys
 from pathlib import Path
 
 import networkx as nx
 from openai import OpenAI
+from rapidfuzz.distance import Levenshtein
 
 EXTRACT_PROMPT = """\
-You are an expert at recovering place names from historical texts. \
-A previous extraction pass found some toponyms in this page, and based on co-occurrence patterns \
-in the corpus, the following place names are predicted to also appear on this page. \
-They may have been overlooked due to OCR errors, unfamiliar romanizations, spelling variants, \
-or insufficient local context.
+You are an expert at identifying place names in historical texts.
 
-Candidate list (toponyms predicted to appear):
+The following toponyms have already been confirmed on this page (for context only):
+{already_found}
+
+Based on co-occurrence patterns in the corpus, these additional toponyms are predicted to \
+also appear on this page — possibly in a variant spelling, different romanization, or \
+slightly distorted by OCR:
 {candidates}
 
-Carefully read the text below and identify which of the candidates actually appear — \
-as nouns referring to a place, including OCR-distorted or alternate-romanized forms. \
-Do NOT include adjectives or demonyms (e.g. "Persian", "Chinese").
-Return ONLY a JSON array of strings in the format "actual text found -> candidate name". \
-Use the exact surface form from the text on the left and the canonical candidate name on the right. \
-If none are found, return [].
+Read the text below and identify which of the candidates above actually appear in it.
+
+Rules:
+- Only confirm candidates from the list above. Do not add new toponyms.
+- Use the exact surface form as it appears in the text (left side of "->").
+- A candidate may appear as a romanization variant or with minor OCR errors — match by meaning.
+- Only confirm if the term is used as a place name (noun), not as an adjective or demonym \
+(e.g. "Persian", "Chinese", "Iranian").
+- Only include a match if you are confident it refers to the place.
+- Most candidates will not appear. Returning [] is perfectly fine.
+
+Return ONLY a JSON array in the format "surface text -> candidate name", or [] if none found.
 
 Text:
 {text}"""
@@ -88,9 +98,33 @@ def parse_matches(response: str) -> list[str]:
         return []
 
 
-def extract_from_candidates(text: str, candidates: list[str], client: OpenAI, model: str) -> list[str]:
-    candidate_str = "\n".join(f"- {c}" for c in sorted(candidates))
-    prompt = EXTRACT_PROMPT.format(candidates=candidate_str, text=text)
+def edit_distance_threshold(length: int) -> int:
+    if length < 4:
+        return 0
+    if length < 5:
+        return 1
+    if length <= 8:
+        return 2
+    return 3
+
+
+def resolve_toponym(surface: str, canonical: str) -> str:
+    """Return canonical if surface is a close spelling variant; otherwise return surface as found."""
+    s, c = surface.lower().strip(), canonical.lower().strip()
+    if s == c:
+        return canonical
+    threshold = edit_distance_threshold(len(c))
+    if threshold == 0:
+        return surface
+    if Levenshtein.distance(s, c) <= threshold:
+        return canonical
+    return surface
+
+
+def extract_from_candidates(text: str, candidates: list[str], found: list[str], client: OpenAI, model: str) -> list[str]:
+    candidate_str = "\n".join(candidates)
+    found_str = "\n".join(found)
+    prompt = EXTRACT_PROMPT.format(already_found=found_str, candidates=candidate_str, text=text)
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
@@ -100,17 +134,115 @@ def extract_from_candidates(text: str, candidates: list[str], client: OpenAI, mo
     return parse_matches(response.choices[0].message.content)
 
 
+def rebuild_graph(page_toponyms: dict[str, list[str]]) -> nx.Graph:
+    G = nx.Graph()
+    for toponyms in page_toponyms.values():
+        for j, t1 in enumerate(toponyms):
+            for t2 in toponyms[j + 1:]:
+                if t1 != t2:
+                    if G.has_edge(t1, t2):
+                        G[t1][t2]["weight"] += 1
+                    else:
+                        G.add_edge(t1, t2, weight=1)
+
+    N = len(page_toponyms)
+    node_count: dict[str, int] = {}
+    for toponyms in page_toponyms.values():
+        for t in toponyms:
+            node_count[t] = node_count.get(t, 0) + 1
+
+    for u, v, d in G.edges(data=True):
+        cocount = d["weight"]
+        pu = node_count.get(u, 0) / N
+        pv = node_count.get(v, 0) / N
+        puv = cocount / N
+        if pu > 0 and pv > 0 and puv > 0:
+            pmi = math.log2(puv / (pu * pv))
+            npmi = pmi / -math.log2(puv)
+        else:
+            npmi = -1.0
+        G[u][v]["weight"] = round(npmi, 4)
+
+    return G
+
+
+def process_one_iteration(
+    page_toponyms: dict[str, list[str]],
+    G: nx.Graph,
+    page_texts: dict[str, dict],
+    client: OpenAI,
+    model: str,
+    iteration_num: int,
+    log_file,
+) -> tuple[dict[str, list[str]], int]:
+    """Run one pass over all eligible pages. Returns (updated_page_toponyms, total_recovered)."""
+    pages_to_process = {pid: tops for pid, tops in page_toponyms.items() if tops and pid in page_texts}
+    updated_page_toponyms = dict(page_toponyms)
+    total_recovered = 0
+
+    for i, (page_id, found_toponyms) in enumerate(pages_to_process.items()):
+        text = preprocess_text(page_texts[page_id].get("full_text", "").strip())
+        if not text:
+            continue
+
+        predicted = set()
+        for toponym in found_toponyms:
+            if G.has_node(toponym):
+                neighbors = sorted(
+                    G.neighbors(toponym),
+                    key=lambda b: G[toponym][b]["weight"],
+                    reverse=True,
+                )
+                predicted.update(neighbors[:5])
+        predicted -= set(found_toponyms)
+
+        if not predicted:
+            continue
+
+        try:
+            confirmed = extract_from_candidates(text, list(predicted), found_toponyms, client, model)
+        except Exception as e:
+            print(f"  [{i+1}/{len(pages_to_process)}] ERROR {page_id}: {e}", file=sys.stderr)
+            continue
+
+        found_lower = {t.lower() for t in found_toponyms}
+        newly_confirmed = [
+            item for item in confirmed
+            if item.split(" -> ", 1)[-1].strip().lower() not in found_lower
+        ]
+
+        if newly_confirmed:
+            canonical_confirmed = [
+                resolve_toponym(item.split(" -> ", 1)[0].strip(), item.split(" -> ", 1)[-1].strip())
+                for item in newly_confirmed
+            ]
+            updated_page_toponyms[page_id] = found_toponyms + canonical_confirmed
+            total_recovered += len(newly_confirmed)
+
+        log_file.write(json.dumps({
+            "iteration": iteration_num,
+            "page_id": page_id,
+            "found_toponyms": found_toponyms,
+            "predicted": list(predicted),
+            "newly_confirmed": newly_confirmed,
+        }, ensure_ascii=False) + "\n")
+
+        status = f"+{len(newly_confirmed)} new" if newly_confirmed else "no change"
+        print(f"  [{i+1}/{len(pages_to_process)}] {page_id}: {status} "
+              f"({len(predicted)} predicted, {len(newly_confirmed)} confirmed)")
+
+    return updated_page_toponyms, total_recovered
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Iteration 2: co-occurrence guided extraction")
+    parser = argparse.ArgumentParser(description="Iterative co-occurrence guided extraction (Iteration 2+)")
     parser.add_argument("--input", required=True, help="Path to ocr.ndjson")
     parser.add_argument("--iter1", required=True, help="Folder with Iteration 1 output")
-    parser.add_argument("--output", required=True, help="Output folder for Iteration 2 results")
+    parser.add_argument("--output", required=True, help="Output folder (overwritten each iteration)")
     parser.add_argument("--model", default="qwen3-72b", help="Model name served by vLLM")
-    parser.add_argument("--limit", type=int, default=None, help="Max pages to process")
-    parser.add_argument("--iteration", type=int, default=2, help="Current iteration number (for logging)")
+    parser.add_argument("--max-iter", type=int, default=15, help="Maximum number of iterations to run")
+    parser.add_argument("--limit", type=int, default=None, help="Max pages to process (for testing)")
     args = parser.parse_args()
-
-    print(f"Iteration {args.iteration} - v15: single LLM call per page with full text + candidate list")
 
     client = OpenAI(
         base_url=os.environ.get("VLLM_BASE_URL", "http://localhost:8080/v1"),
@@ -126,121 +258,50 @@ def main():
     )
     G: nx.Graph = nx.read_gexf(iter1_dir / "cooccurrence_graph.gexf")
 
-    pages_to_process = {
-        page_id: toponyms
-        for page_id, toponyms in page_toponyms.items()
-        if toponyms
-    }
-
+    page_ids_to_load = {pid for pid, tops in page_toponyms.items() if tops}
     if args.limit:
-        pages_to_process = dict(list(pages_to_process.items())[:args.limit])
+        page_ids_to_load = set(list(page_ids_to_load)[:args.limit])
 
-    print(f"Loading {len(pages_to_process)} pages from ndjson...")
-    page_texts = load_pages_from_ndjson(args.input, set(pages_to_process.keys()))
-    print(f"Loaded {len(page_texts)} pages. Starting Iteration 2...")
+    print(f"Loading {len(page_ids_to_load)} pages from ndjson...")
+    page_texts = load_pages_from_ndjson(args.input, page_ids_to_load)
+    print(f"Loaded {len(page_texts)} pages.")
 
-    updated_page_toponyms: dict[str, list[str]] = dict(page_toponyms)
     log_path = output_dir / "log.jsonl"
-    total_recovered = 0
+    iterations_done = 0
 
     with open(log_path, "w", encoding="utf-8") as log_file:
-        for i, (page_id, found_toponyms) in enumerate(pages_to_process.items()):
+        for n in range(2, args.max_iter + 2):
+            print(f"\n{'=' * 60}")
+            print(f"Iteration {n}  ({iterations_done + 1} of max {args.max_iter})")
+            print(f"{'=' * 60}")
 
-            page = page_texts.get(page_id)
-            if not page:
-                print(f"  [{i+1}/{len(pages_to_process)}] {page_id}: not found in ndjson, skipping")
-                continue
+            page_toponyms, total_recovered = process_one_iteration(
+                page_toponyms, G, page_texts, client, args.model, n, log_file
+            )
+            iterations_done += 1
 
-            text = preprocess_text(page.get("full_text", "").strip())
-            if not text:
-                continue
+            G = rebuild_graph(page_toponyms)
 
-            # Co-occurrence prediction: top-5 NPMI neighbors per found toponym
-            predicted = set()
-            for toponym in found_toponyms:
-                if G.has_node(toponym):
-                    neighbors = sorted(
-                        G.neighbors(toponym),
-                        key=lambda b: G[toponym][b]["weight"],
-                        reverse=True
-                    )
-                    predicted.update(neighbors[:5])
-            predicted -= set(found_toponyms)
+            with open(output_dir / "page_toponyms.json", "w", encoding="utf-8") as f:
+                json.dump(page_toponyms, f, ensure_ascii=False, indent=2)
+            nx.write_gexf(G, output_dir / "cooccurrence_graph.gexf")
 
-            if not predicted:
-                continue
+            log_file.write(json.dumps({
+                "summary": True,
+                "iteration": n,
+                "new_toponyms_recovered": total_recovered,
+            }, ensure_ascii=False) + "\n")
+            log_file.flush()
 
-            # Single LLM call: extract confirmed candidates from full page text
-            confirmed = extract_from_candidates(text, list(predicted), client, args.model)
+            print(f"\n[Iteration {n}] {total_recovered} new toponyms recovered.")
 
-            # Filter to only those whose candidate is not already in found_toponyms
-            found_lower = {t.lower() for t in found_toponyms}
-            newly_confirmed = [
-                item for item in confirmed
-                if item.split(" -> ", 1)[-1].strip().lower() not in found_lower
-            ]
-
-            if newly_confirmed:
-                canonical_confirmed = [item.split(" -> ", 1)[-1].strip() for item in newly_confirmed]
-                updated_page_toponyms[page_id] = found_toponyms + canonical_confirmed
-                total_recovered += len(newly_confirmed)
-
-            log_entry = {
-                "page_id": page_id,
-                "iter1_toponyms": found_toponyms,
-                "predicted": list(predicted),
-                "newly_confirmed": newly_confirmed,
-            }
-            log_file.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-
-            status = f"+{len(newly_confirmed)} new" if newly_confirmed else "no change"
-            print(f"  [{i+1}/{len(pages_to_process)}] {page_id}: {status} "
-                  f"({len(predicted)} predicted, {len(newly_confirmed)} confirmed)")
-
-    with open(output_dir / "page_toponyms.json", "w", encoding="utf-8") as f:
-        json.dump(updated_page_toponyms, f, ensure_ascii=False, indent=2)
-
-    # Rebuild co-occurrence graph from updated_page_toponyms for next iteration
-    G_new = nx.Graph()
-    for toponyms in updated_page_toponyms.values():
-        for j, t1 in enumerate(toponyms):
-            for t2 in toponyms[j + 1:]:
-                if t1 != t2:
-                    if G_new.has_edge(t1, t2):
-                        G_new[t1][t2]["weight"] += 1
-                    else:
-                        G_new.add_edge(t1, t2, weight=1)
-
-    N = len(updated_page_toponyms)
-    node_count: dict[str, int] = {}
-    for toponyms in updated_page_toponyms.values():
-        for t in toponyms:
-            node_count[t] = node_count.get(t, 0) + 1
-
-    for u, v, d in G_new.edges(data=True):
-        cocount = d["weight"]
-        pu = node_count.get(u, 0) / N
-        pv = node_count.get(v, 0) / N
-        puv = cocount / N
-        if pu > 0 and pv > 0 and puv > 0:
-            pmi = math.log2(puv / (pu * pv))
-            npmi = pmi / -math.log2(puv)
+            if total_recovered == 0:
+                print(f"Converged after {iterations_done} iteration(s).")
+                break
         else:
-            npmi = -1.0
-        G_new[u][v]["weight"] = round(npmi, 4)
+            print(f"\nReached --max-iter limit ({args.max_iter} iteration(s)). Stopping.")
 
-    nx.write_gexf(G_new, output_dir / "cooccurrence_graph.gexf")
-
-    print(f"\nDone. {total_recovered} new toponyms recovered across {len(pages_to_process)} pages.")
-    print(f"Results saved to {output_dir}/")
-
-    with open(log_path, "a", encoding="utf-8") as log_file:
-        log_file.write(json.dumps({
-            "summary": True,
-            "iteration": args.iteration,
-            "pages_processed": len(pages_to_process),
-            "new_toponyms_recovered": total_recovered,
-        }, ensure_ascii=False) + "\n")
+    print(f"\nDone. {iterations_done} iteration(s) run. Results saved to {output_dir}/")
 
 
 if __name__ == "__main__":

@@ -102,7 +102,10 @@ def dedup_toponyms(toponyms: list[str]) -> list[str]:
     lower = [t.lower() for t in unique]
     return [
         t for i, t in enumerate(unique)
-        if not any(lower[i] in lower[j] for j in range(len(unique)) if j != i and lower[i] != lower[j])
+        if not any(
+            re.search(r'\b' + re.escape(lower[i]) + r'\b', lower[j])
+            for j in range(len(unique)) if j != i and lower[i] != lower[j]
+        )
     ]
 
 
