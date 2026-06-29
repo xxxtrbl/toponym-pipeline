@@ -21,26 +21,40 @@ from pathlib import Path
 
 import networkx as nx
 from openai import OpenAI
-from rapidfuzz.distance import Levenshtein
 
 EXTRACT_PROMPT = """\
-You are an expert at identifying place names in historical texts.
+You are an expert linguist specializing in historical place names.
 
-Based on co-occurrence patterns in the corpus, the following place names are predicted to \
-also appear on this page — possibly in a variant spelling, different romanization, or \
-slightly distorted by OCR:
+The following place names are predicted to appear in the text below, based on co-occurrence \
+patterns in the corpus. They may appear in variant spellings, different romanizations, or \
+with minor OCR distortions:
 {candidates}
 
-Read the text below and identify which of the candidates above actually appear in it.
+Mark each term in the text that corresponds to a candidate above by wrapping it with @@ and ##.
 
 Rules:
-- Only confirm candidates from the list above. Do not add new toponyms.
-- Use the exact surface form as it appears in the text (left side of "->").
-- A candidate may appear as a romanization variant or with minor OCR errors — match by meaning.
-- Only confirm if the term is used as a place name (noun), not as an adjective or demonym \
-(e.g. "Persian", "Chinese", "Iranian").
+- Only mark terms that correspond to a candidate above.
+- Mark the exact surface form as it appears in the text.
+- Only mark place names (cities, countries, regions, rivers, mountains) — not adjectives, \
+demonyms, dynasty names, or period names (e.g. "Persian", "Chinese", "T'ang", "Tsin").
+- If no candidates appear, return the text unchanged.
 
-Return ONLY a JSON array in the format "surface text -> candidate name", or [] if none found.
+Examples (candidates shown for context):
+Candidates: France, Britain, Ireland
+Input:  Only France and Britain backed Fischler's proposal.
+Output: Only @@France## and @@Britain## backed Fischler's proposal.
+
+Candidates: India, Persia, China
+Input:  In the T'ang period, several Indian and Persian texts were translated.
+Output: In the T'ang period, several Indian and Persian texts were translated.
+
+Candidates: Fu-lin, Turkistan
+Input:  In the T'ang period the Chinese learned that the people of Fulin relished grape-wine, \
+and that Turkistan had fallen into the hands of Turkish tribes.
+Output: In the T'ang period the Chinese learned that the people of @@Fulin## relished \
+grape-wine, and that @@Turkistan## had fallen into the hands of Turkish tribes.
+
+Return ONLY the full text with markings applied, nothing else.
 
 Text:
 {text}"""
@@ -75,55 +89,19 @@ def load_pages_from_ndjson(ndjson_path: str, page_ids: set[str]) -> dict[str, di
 
 
 def parse_matches(response: str) -> list[str]:
-    """Parse LLM response into list of 'found -> candidate' strings."""
-    match = re.search(r"\[.*?\]", response, re.DOTALL)
-    if not match:
-        return []
-    try:
-        items = json.loads(match.group())
-        result = []
-        for item in items:
-            if not isinstance(item, str):
-                continue
-            item = item.strip()
-            if " -> " in item:
-                result.append(item)
-        return result
-    except json.JSONDecodeError:
-        return []
+    """Extract surface forms marked as @@surface## in the LLM response."""
+    return re.findall(r'@@(.*?)##', response)
 
-
-def edit_distance_threshold(length: int) -> int:
-    if length < 4:
-        return 0
-    if length < 5:
-        return 1
-    if length <= 8:
-        return 2
-    return 3
-
-
-def resolve_toponym(surface: str, canonical: str) -> str:
-    """Return canonical if surface is a close spelling variant; otherwise return surface as found."""
-    s, c = surface.lower().strip(), canonical.lower().strip()
-    if s == c:
-        return canonical
-    threshold = edit_distance_threshold(len(c))
-    if threshold == 0:
-        return surface
-    if Levenshtein.distance(s, c) <= threshold:
-        return canonical
-    return surface
 
 
 def extract_from_candidates(text: str, candidates: list[str], client: OpenAI, model: str) -> list[str]:
     candidate_str = "\n".join(candidates)
-    prompt = EXTRACT_PROMPT.format(candidates=candidate_str, text=text)
+    prompt = EXTRACT_PROMPT.replace("{candidates}", candidate_str).replace("{text}", text)
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        max_tokens=1024,
+        max_tokens=16384,
     )
     return parse_matches(response.choices[0].message.content)
 
@@ -200,17 +178,10 @@ def process_one_iteration(
             continue
 
         found_lower = {t.lower() for t in found_toponyms}
-        newly_confirmed = [
-            item for item in confirmed
-            if item.split(" -> ", 1)[-1].strip().lower() not in found_lower
-        ]
+        newly_confirmed = [s for s in confirmed if s.lower() not in found_lower]
 
         if newly_confirmed:
-            canonical_confirmed = list(dict.fromkeys(
-                resolve_toponym(item.split(" -> ", 1)[0].strip(), item.split(" -> ", 1)[-1].strip())
-                for item in newly_confirmed
-            ))
-            updated_page_toponyms[page_id] = found_toponyms + canonical_confirmed
+            updated_page_toponyms[page_id] = found_toponyms + list(dict.fromkeys(newly_confirmed))
             total_recovered += len(newly_confirmed)
 
         log_file.write(json.dumps({
