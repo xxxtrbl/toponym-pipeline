@@ -128,18 +128,6 @@ def extract_from_candidates(text: str, candidates: list[str], client: OpenAI, mo
     return parse_matches(response.choices[0].message.content)
 
 
-def dedup_toponyms(toponyms: list[str]) -> list[str]:
-    unique = list(dict.fromkeys(toponyms))
-    lower = [t.lower() for t in unique]
-    return [
-        t for i, t in enumerate(unique)
-        if not any(
-            re.search(r'\b' + re.escape(lower[i]) + r'\b', lower[j])
-            for j in range(len(unique)) if j != i and lower[i] != lower[j]
-        )
-    ]
-
-
 def rebuild_graph(page_toponyms: dict[str, list[str]]) -> nx.Graph:
     G = nx.Graph()
     for toponyms in page_toponyms.values():
@@ -287,8 +275,6 @@ def main():
             iterations_done += 1
 
             G = rebuild_graph(page_toponyms)
-
-            page_toponyms = {pid: dedup_toponyms(tops) for pid, tops in page_toponyms.items()}
 
             with open(output_dir / "page_toponyms.json", "w", encoding="utf-8") as f:
                 json.dump(page_toponyms, f, ensure_ascii=False, indent=2)
