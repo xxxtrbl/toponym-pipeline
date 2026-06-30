@@ -146,6 +146,7 @@ def process_one_iteration(
     model: str,
     iteration_num: int,
     log_file,
+    tried_per_page: dict[str, set[str]],
 ) -> tuple[dict[str, list[str]], int]:
     """Run one pass over all eligible pages. Returns (updated_page_toponyms, total_recovered)."""
     pages_to_process = {pid: tops for pid, tops in page_toponyms.items() if tops and pid in page_texts}
@@ -168,11 +169,14 @@ def process_one_iteration(
                 predicted.update(neighbors[:5])
         predicted -= set(found_toponyms)
 
-        if not predicted:
+        new_predicted = predicted - tried_per_page.get(page_id, set())
+        if not new_predicted:
             continue
 
+        tried_per_page.setdefault(page_id, set()).update(new_predicted)
+
         try:
-            confirmed = extract_from_candidates(text, list(predicted), client, model)
+            confirmed = extract_from_candidates(text, list(new_predicted), client, model)
         except Exception as e:
             print(f"  [{i+1}/{len(pages_to_process)}] ERROR {page_id}: {e}", file=sys.stderr)
             continue
@@ -188,13 +192,13 @@ def process_one_iteration(
             "iteration": iteration_num,
             "page_id": page_id,
             "found_toponyms": found_toponyms,
-            "predicted": list(predicted),
+            "new_predicted": list(new_predicted),
             "newly_confirmed": newly_confirmed,
         }, ensure_ascii=False) + "\n")
 
         status = f"+{len(newly_confirmed)} new" if newly_confirmed else "no change"
         print(f"  [{i+1}/{len(pages_to_process)}] {page_id}: {status} "
-              f"({len(predicted)} predicted, {len(newly_confirmed)} confirmed)")
+              f"({len(new_predicted)} predicted, {len(newly_confirmed)} confirmed)")
 
     return updated_page_toponyms, total_recovered
 
@@ -233,6 +237,7 @@ def main():
 
     log_path = output_dir / "log.jsonl"
     iterations_done = 0
+    tried_per_page: dict[str, set[str]] = {}
 
     with open(log_path, "w", encoding="utf-8") as log_file:
         for n in range(2, args.max_iter + 2):
@@ -241,7 +246,7 @@ def main():
             print(f"{'=' * 60}")
 
             page_toponyms, total_recovered = process_one_iteration(
-                page_toponyms, G, page_texts, client, args.model, n, log_file
+                page_toponyms, G, page_texts, client, args.model, n, log_file, tried_per_page
             )
             iterations_done += 1
 
