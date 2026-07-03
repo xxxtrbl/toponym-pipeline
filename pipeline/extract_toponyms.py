@@ -17,25 +17,42 @@ from pathlib import Path
 import networkx as nx
 from openai import OpenAI
 
-PROMPT = """\
-Extract all place names (toponyms) from the text below.
+ENTITY_TYPE_PROMPT = """\
+Is the following term a place name (toponym)?
+Answer on two lines:
+Line 1: TOPONYM or NON-TOPONYM
+Line 2: one sentence explaining why.
 
-If no toponyms are found, return an empty array [].
-Return ONLY a JSON array of strings, one toponym per item, no explanation.
+Term: {term}
+Context: {context}"""
+
+PROMPT = """\
+You are an accurate Named Entity Recognition system specialized in toponym extraction.
+
+Your task: mark all place names (toponyms) in the text below by wrapping them with @@ and ##.
+
+Guidelines:
+- Include cities, countries, regions, rivers, mountains, and historical place names.
+- Do NOT mark relational adjectives derived from place names (e.g. "Turkish", "Chinese", "Iranian", "Malayan").
+- Do NOT mark dynasty or period names used as time references (e.g. "T'ang", "Tsin").
+- If no toponyms are found, return the text unchanged.
+- Return ONLY the full text with markings applied, nothing else.
+
+Examples:
+Input: Germany imported 47600 sheep from Britain last year.
+Output: @@Germany## imported 47600 sheep from @@Britain## last year.
+
+Input: It brought in 4275 tonnes of British mutton from Ireland, some 10 percent of overall imports.
+Output: It brought in 4275 tonnes of British mutton from @@Ireland##, some 10 percent of overall imports.
+
+Input: In the T'ang period, several Indian and Persian texts were translated.
+Output: In the T'ang period, several Indian and Persian texts were translated.
+
+Input: In the T'ang period the Chinese learned that the people of Fu-lin relished grape-wine, and that Turkistan had fallen into the hands of Turkish tribes.
+Output: In the T'ang period the Chinese learned that the people of @@Fu-lin## relished grape-wine, and that @@Turkistan## had fallen into the hands of Turkish tribes.
 
 Text:
 {text}"""
-
-VERIFY_PROMPT = """\
-Is the bracketed term used as a place name (country, city, region, river, or historical territory) in the following text?
-Answer yes for geographic names used in any sense — including historical or general references.
-Answer no for adjectives, demonyms (e.g. Chinese, Persian, Indian), dynasty names, or language names.
-Answer only "yes" or "no", no explanation.
-
-Text: {context}
-Answer:"""
-
-CONTEXT_CHARS = 150
 
 
 def parse_page_range(s: str) -> tuple[int, int]:
@@ -110,66 +127,41 @@ def dedup_toponyms(toponyms: list[str]) -> list[str]:
 
 
 def parse_toponyms(response: str) -> list[str]:
-    match = re.search(r"\[.*?\]", response, re.DOTALL)
-    if not match:
-        return []
-    try:
-        toponyms = json.loads(match.group())
-        return [t.strip() for t in toponyms if isinstance(t, str) and t.strip()]
-    except json.JSONDecodeError:
-        return []
+    return re.findall(r'@@([^@#]+)##', response)
 
 
-def find_in_text(text: str, candidate: str) -> int | None:
-    match = re.search(re.escape(candidate), text, re.IGNORECASE)
-    return match.start() if match else None
+def get_context_snippet(text: str, term: str, context_chars: int = 150) -> str:
+    m = re.search(re.escape(term), text, re.IGNORECASE)
+    if not m:
+        return text[:300]
+    start = max(0, m.start() - context_chars)
+    end = min(len(text), m.end() + context_chars)
+    return f"...{text[start:m.start()]}[{text[m.start():m.end()]}]{text[m.end():end]}..."
 
 
-def get_context(text: str, position: int, length: int) -> str:
-    start = max(0, position - CONTEXT_CHARS)
-    end = min(len(text), position + length + CONTEXT_CHARS)
-    return f"...{text[start:position]}[{text[position:position+length]}]{text[position+length:end]}..."
-
-
-def verify_toponym(context: str, client: OpenAI, model: str) -> bool:
-    prompt = VERIFY_PROMPT.format(context=context)
+def process_page(text: str, client: OpenAI, model: str) -> list[str]:
+    prompt = PROMPT.replace("{text}", text)
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        max_tokens=16,
+        max_tokens=16384,
     )
-    return response.choices[0].message.content.strip().lower().startswith("yes")
+    return parse_toponyms(response.choices[0].message.content)
 
 
-def filter_with_context(candidates: list[str], text: str, client: OpenAI, model: str) -> tuple[list[str], list[str]]:
-    confirmed, rejected = [], []
-    for candidate in candidates:
-        pos = find_in_text(text, candidate)
-        if pos is None:
-            rejected.append(candidate)  # hallucination — not in source text
-            continue
-        context = get_context(text, pos, len(candidate))
-        if verify_toponym(context, client, model):
-            confirmed.append(candidate)
-        else:
-            rejected.append(candidate)
-    return confirmed, rejected
-
-
-def process_page(page: dict, client: OpenAI, model: str) -> tuple[list[str], list[str]]:
-    text = preprocess_text(page.get("full_text", "").strip())
-    if not text or text == "(empty)":
-        return [], []
-    prompt = PROMPT.format(text=text)
+def classify_node(term: str, context: str, client: OpenAI, model: str) -> tuple[bool, str]:
+    prompt = ENTITY_TYPE_PROMPT.replace("{term}", term).replace("{context}", context)
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        max_tokens=512,
+        max_tokens=64,
     )
-    raw = parse_toponyms(response.choices[0].message.content)
-    return filter_with_context(raw, text, client, model)
+    lines = response.choices[0].message.content.strip().splitlines()
+    is_toponym = lines[0].strip().upper() == "TOPONYM"
+    reason = lines[1].strip() if len(lines) > 1 else ""
+    return is_toponym, reason
 
 
 def main():
@@ -196,37 +188,41 @@ def main():
     pages = iter_pages(args.input, args.book, args.lang, page_range, args.limit)
 
     page_toponyms: dict[str, list[str]] = {}
+    toponym_contexts: dict[str, str] = {}
     log_path = output_dir / "log.jsonl"
 
-    # Pass 1: extract toponyms from all pages
+    # Pass 1: extract toponyms from all pages, collect first-seen context per toponym
     i = 0
     with open(log_path, "w", encoding="utf-8") as log_file:
         for page in pages:
             i += 1
             page_id = page.get("custom_id", f"page_{i}")
+            text = preprocess_text(page.get("full_text", "").strip())
+            if not text or text == "(empty)":
+                continue
 
             try:
-                toponyms, rejected = process_page(page, client, args.model)
+                toponyms = process_page(text, client, args.model)
             except Exception as e:
                 print(f"  [{i}] ERROR {page_id}: {e}", file=sys.stderr)
                 continue
 
             page_toponyms[page_id] = dedup_toponyms(toponyms)
 
+            for t in toponyms:
+                if t not in toponym_contexts:
+                    toponym_contexts[t] = get_context_snippet(text, t)
+
             log_entry = {
                 "page_id": page_id,
                 "language": page.get("language"),
                 "toponym_count": len(toponyms),
                 "toponyms": toponyms,
-                "rejected": rejected,
             }
             log_file.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
             status = f"{len(toponyms)} toponyms" if toponyms else "none / skipped"
             print(f"  [{i}] {page_id}: {status}")
-
-    with open(output_dir / "page_toponyms.json", "w", encoding="utf-8") as f:
-        json.dump(page_toponyms, f, ensure_ascii=False, indent=2)
 
     # Pass 2: build co-occurrence graph with raw counts
     G = nx.Graph()
@@ -258,7 +254,41 @@ def main():
             npmi = -1.0
         G[u][v]["weight"] = round(npmi, 4)
 
+    # Pass 4: entity typing — classify every graph node, prune non-toponyms
+    nodes = list(G.nodes())
+    print(f"\n[Entity check] Classifying {len(nodes)} graph nodes...")
+    to_remove = set()
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        for j, term in enumerate(nodes):
+            context = toponym_contexts.get(term, "")
+            try:
+                is_toponym, reason = classify_node(term, context, client, args.model)
+            except Exception as e:
+                print(f"  [{j+1}/{len(nodes)}] ERROR {term}: {e}", file=sys.stderr)
+                continue
+            log_file.write(json.dumps({
+                "entity_check": True,
+                "term": term,
+                "is_toponym": is_toponym,
+                "reason": reason,
+                "context": context,
+            }, ensure_ascii=False) + "\n")
+            if not is_toponym:
+                to_remove.add(term)
+            status = "TOPONYM" if is_toponym else "NON-TOPONYM"
+            print(f"  [{j+1}/{len(nodes)}] {term}: {status} — {reason}")
+
+    G.remove_nodes_from(to_remove)
+    page_toponyms = {
+        pid: [t for t in tops if t not in to_remove]
+        for pid, tops in page_toponyms.items()
+    }
+    print(f"[Entity check] Removed {len(to_remove)} non-toponym nodes.")
+
     nx.write_gexf(G, output_dir / "cooccurrence_graph.gexf")
+
+    with open(output_dir / "page_toponyms.json", "w", encoding="utf-8") as f:
+        json.dump(page_toponyms, f, ensure_ascii=False, indent=2)
 
     total = sum(len(v) for v in page_toponyms.values())
     unique = G.number_of_nodes()

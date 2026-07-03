@@ -48,6 +48,10 @@ Candidates: India, Persia, China
 Input:  In the T'ang period, several Indian and Persian texts were translated.
 Output: In the T'ang period, several Indian and Persian texts were translated.
 
+Candidates: Iran, Malaya
+Input:  Several Iranian manuscripts and Malayan traders were found along the route.
+Output: Several Iranian manuscripts and Malayan traders were found along the route.
+
 Candidates: Fu-lin, Turkistan
 Input:  In the T'ang period the Chinese learned that the people of Fulin relished grape-wine, \
 and that Turkistan had fallen into the hands of Turkish tribes.
