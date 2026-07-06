@@ -19,12 +19,14 @@ from openai import OpenAI
 
 ENTITY_TYPE_PROMPT = """\
 Is the following term a place name (toponym)?
-Answer on two lines:
-Line 1: TOPONYM or NON-TOPONYM
-Line 2: one sentence explaining why.
 
 Term: {term}
-Context: {context}"""
+Context: {context}
+
+Note: ethnic or tribal group names (e.g. "Hiuń-nu", "Yüe-či") are NON-TOPONYM even if associated with a region.
+Answer on two lines:
+Line 1: one sentence explaining why.
+Line 2: TOPONYM or NON-TOPONYM"""
 
 PROMPT = """\
 You are an accurate Named Entity Recognition system specialized in toponym extraction.
@@ -150,17 +152,18 @@ def process_page(text: str, client: OpenAI, model: str) -> list[str]:
     return parse_toponyms(response.choices[0].message.content)
 
 
-def classify_node(term: str, context: str, client: OpenAI, model: str) -> tuple[bool, str]:
-    prompt = ENTITY_TYPE_PROMPT.replace("{term}", term).replace("{context}", context)
+def classify_node(term: str, contexts: list[str], client: OpenAI, model: str) -> tuple[bool, str]:
+    context_str = "\n".join(f"Context {i+1}: {c}" for i, c in enumerate(contexts))
+    prompt = ENTITY_TYPE_PROMPT.replace("{term}", term).replace("{context}", context_str)
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        max_tokens=64,
+        max_tokens=128,
     )
     lines = response.choices[0].message.content.strip().splitlines()
-    is_toponym = lines[0].strip().upper() == "TOPONYM"
-    reason = lines[1].strip() if len(lines) > 1 else ""
+    reason = lines[0].strip() if lines else ""
+    is_toponym = lines[1].strip().upper() == "TOPONYM" if len(lines) > 1 else False
     return is_toponym, reason
 
 
@@ -188,7 +191,7 @@ def main():
     pages = iter_pages(args.input, args.book, args.lang, page_range, args.limit)
 
     page_toponyms: dict[str, list[str]] = {}
-    toponym_contexts: dict[str, str] = {}
+    toponym_contexts: dict[str, list[str]] = {}
     log_path = output_dir / "log.jsonl"
 
     # Pass 1: extract toponyms from all pages, collect first-seen context per toponym
@@ -210,8 +213,9 @@ def main():
             page_toponyms[page_id] = dedup_toponyms(toponyms)
 
             for t in toponyms:
-                if t not in toponym_contexts:
-                    toponym_contexts[t] = get_context_snippet(text, t)
+                if len(toponym_contexts.get(t, [])) < 3:
+                    snippet = get_context_snippet(text, t)
+                    toponym_contexts.setdefault(t, []).append(snippet)
 
             log_entry = {
                 "page_id": page_id,
@@ -260,9 +264,9 @@ def main():
     to_remove = set()
     with open(log_path, "a", encoding="utf-8") as log_file:
         for j, term in enumerate(nodes):
-            context = toponym_contexts.get(term, "")
+            contexts = toponym_contexts.get(term, [])
             try:
-                is_toponym, reason = classify_node(term, context, client, args.model)
+                is_toponym, reason = classify_node(term, contexts, client, args.model)
             except Exception as e:
                 print(f"  [{j+1}/{len(nodes)}] ERROR {term}: {e}", file=sys.stderr)
                 continue
@@ -271,7 +275,7 @@ def main():
                 "term": term,
                 "is_toponym": is_toponym,
                 "reason": reason,
-                "context": context,
+                "contexts": contexts,
             }, ensure_ascii=False) + "\n")
             if not is_toponym:
                 to_remove.add(term)
@@ -284,6 +288,9 @@ def main():
         for pid, tops in page_toponyms.items()
     }
     print(f"[Entity check] Removed {len(to_remove)} non-toponym nodes.")
+
+    with open(output_dir / "rejected_nodes.json", "w", encoding="utf-8") as f:
+        json.dump(sorted(to_remove), f, ensure_ascii=False, indent=2)
 
     nx.write_gexf(G, output_dir / "cooccurrence_graph.gexf")
 

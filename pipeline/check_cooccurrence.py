@@ -64,10 +64,45 @@ Text:
 {text}"""
 
 
+ENTITY_TYPE_PROMPT = """\
+Is the following term a place name (toponym)?
+
+Term: {term}
+Context: {context}
+
+Note: ethnic or tribal group names (e.g. "Hiuń-nu", "Yüe-či") are NON-TOPONYM even if associated with a region.
+Answer on two lines:
+Line 1: one sentence explaining why.
+Line 2: TOPONYM or NON-TOPONYM"""
+
+
 def preprocess_text(text: str) -> str:
     """Join line-break hyphens, then replace remaining newlines with spaces."""
     text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
     return text.replace('\n', ' ')
+
+
+def get_context_snippet(text: str, term: str, context_chars: int = 150) -> str:
+    m = re.search(re.escape(term), text, re.IGNORECASE)
+    if not m:
+        return text[:300]
+    start = max(0, m.start() - context_chars)
+    end = min(len(text), m.end() + context_chars)
+    return f"...{text[start:m.start()]}[{text[m.start():m.end()]}]{text[m.end():end]}..."
+
+
+def classify_node(term: str, context: str, client: OpenAI, model: str) -> tuple[bool, str]:
+    prompt = ENTITY_TYPE_PROMPT.replace("{term}", term).replace("{context}", context)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=128,
+    )
+    lines = response.choices[0].message.content.strip().splitlines()
+    reason = lines[0].strip() if lines else ""
+    is_toponym = lines[1].strip().upper() == "TOPONYM" if len(lines) > 1 else False
+    return is_toponym, reason
 
 
 def load_pages_from_ndjson(ndjson_path: str, page_ids: set[str]) -> dict[str, dict]:
@@ -95,7 +130,6 @@ def load_pages_from_ndjson(ndjson_path: str, page_ids: set[str]) -> dict[str, di
 def parse_matches(response: str) -> list[str]:
     """Extract surface forms marked as @@surface## in the LLM response."""
     return re.findall(r'@@(.*?)##', response)
-
 
 
 def extract_from_candidates(text: str, candidates: list[str], client: OpenAI, model: str) -> list[str]:
@@ -151,6 +185,7 @@ def process_one_iteration(
     iteration_num: int,
     log_file,
     tried_per_page: dict[str, set[str]],
+    rejected_nodes: set[str],
 ) -> tuple[dict[str, list[str]], int]:
     """Run one pass over all eligible pages. Returns (updated_page_toponyms, total_recovered)."""
     pages_to_process = {pid: tops for pid, tops in page_toponyms.items() if tops and pid in page_texts}
@@ -186,7 +221,33 @@ def process_one_iteration(
             continue
 
         found_lower = {t.lower() for t in found_toponyms}
-        newly_confirmed = [s for s in confirmed if s.lower() not in found_lower]
+        rejected_lower = {r.lower() for r in rejected_nodes}
+        candidates_for_typing = [
+            s for s in confirmed
+            if s.lower() not in found_lower and s.lower() not in rejected_lower
+        ]
+
+        newly_confirmed = []
+        for term in candidates_for_typing:
+            context = get_context_snippet(text, term)
+            try:
+                is_toponym, reason = classify_node(term, context, client, model)
+            except Exception as e:
+                print(f"    ERROR classifying {term}: {e}", file=sys.stderr)
+                is_toponym, reason = True, ""
+            log_file.write(json.dumps({
+                "entity_check": True,
+                "iteration": iteration_num,
+                "page_id": page_id,
+                "term": term,
+                "is_toponym": is_toponym,
+                "reason": reason,
+                "context": context,
+            }, ensure_ascii=False) + "\n")
+            if is_toponym:
+                newly_confirmed.append(term)
+            else:
+                rejected_nodes.add(term)
 
         if newly_confirmed:
             updated_page_toponyms[page_id] = found_toponyms + list(dict.fromkeys(newly_confirmed))
@@ -231,6 +292,11 @@ def main():
     )
     G: nx.Graph = nx.read_gexf(iter1_dir / "cooccurrence_graph.gexf")
 
+    rejected_nodes_path = iter1_dir / "rejected_nodes.json"
+    rejected_nodes: set[str] = set(
+        json.loads(rejected_nodes_path.read_text(encoding="utf-8"))
+    ) if rejected_nodes_path.exists() else set()
+
     page_ids_to_load = {pid for pid, tops in page_toponyms.items() if tops}
     if args.limit:
         page_ids_to_load = set(list(page_ids_to_load)[:args.limit])
@@ -250,7 +316,7 @@ def main():
             print(f"{'=' * 60}")
 
             page_toponyms, total_recovered = process_one_iteration(
-                page_toponyms, G, page_texts, client, args.model, n, log_file, tried_per_page
+                page_toponyms, G, page_texts, client, args.model, n, log_file, tried_per_page, rejected_nodes
             )
             iterations_done += 1
 
