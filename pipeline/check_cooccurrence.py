@@ -71,9 +71,9 @@ Term: {term}
 Context: {context}
 
 Note: ethnic or tribal group names (e.g. "Hiuń-nu", "Yüe-či") are NON-TOPONYM even if associated with a region.
-Answer on two lines:
-Line 1: one sentence explaining why.
-Line 2: TOPONYM or NON-TOPONYM"""
+Answer on two lines. Make sure Line 2 is consistent with Line 1:
+Line 1: TOPONYM or NON-TOPONYM
+Line 2: one sentence explaining why."""
 
 
 def preprocess_text(text: str) -> str:
@@ -100,8 +100,8 @@ def classify_node(term: str, context: str, client: OpenAI, model: str) -> tuple[
         max_tokens=128,
     )
     lines = response.choices[0].message.content.strip().splitlines()
-    reason = lines[0].strip() if lines else ""
-    is_toponym = lines[1].strip().upper() == "TOPONYM" if len(lines) > 1 else False
+    is_toponym = lines[0].strip().upper() == "TOPONYM" if lines else False
+    reason = lines[1].strip() if len(lines) > 1 else ""
     return is_toponym, reason
 
 
