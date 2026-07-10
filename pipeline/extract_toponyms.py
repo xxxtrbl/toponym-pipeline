@@ -29,29 +29,10 @@ Line 1: TOPONYM or NON-TOPONYM
 Line 2: one sentence explaining why."""
 
 PROMPT = """\
-You are an accurate Named Entity Recognition system specialized in toponym extraction.
+Extract all place names (toponyms) from the text below.
 
-Your task: mark all place names (toponyms) in the text below by wrapping them with @@ and ##.
-
-Guidelines:
-- Include cities, countries, regions, rivers, mountains, and historical place names.
-- Do NOT mark relational adjectives derived from place names (e.g. "Turkish", "Chinese", "Iranian", "Malayan").
-- Do NOT mark dynasty or period names used as time references (e.g. "T'ang", "Tsin").
-- If no toponyms are found, return the text unchanged.
-- Return ONLY the full text with markings applied, nothing else.
-
-Examples:
-Input: Germany imported 47600 sheep from Britain last year.
-Output: @@Germany## imported 47600 sheep from @@Britain## last year.
-
-Input: It brought in 4275 tonnes of British mutton from Ireland, some 10 percent of overall imports.
-Output: It brought in 4275 tonnes of British mutton from @@Ireland##, some 10 percent of overall imports.
-
-Input: In the T'ang period, several Indian and Persian texts were translated.
-Output: In the T'ang period, several Indian and Persian texts were translated.
-
-Input: In the T'ang period the Chinese learned that the people of Fu-lin relished grape-wine, and that Turkistan had fallen into the hands of Turkish tribes.
-Output: In the T'ang period the Chinese learned that the people of @@Fu-lin## relished grape-wine, and that @@Turkistan## had fallen into the hands of Turkish tribes.
+If no toponyms are found, return an empty array [].
+Return ONLY a JSON array of strings, one toponym per item, no explanation.
 
 Text:
 {text}"""
@@ -129,7 +110,13 @@ def dedup_toponyms(toponyms: list[str]) -> list[str]:
 
 
 def parse_toponyms(response: str) -> list[str]:
-    return re.findall(r'@@([^@#]+)##', response)
+    try:
+        result = json.loads(response.strip())
+        if isinstance(result, list):
+            return [str(t) for t in result if t]
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return []
 
 
 def get_context_snippet(text: str, term: str, context_chars: int = 150) -> str:
@@ -253,7 +240,8 @@ def main():
         puv = cocount / N
         if pu > 0 and pv > 0 and puv > 0:
             pmi = math.log2(puv / (pu * pv))
-            npmi = pmi / -math.log2(puv)
+            denom = -math.log2(puv)
+            npmi = pmi / denom if denom != 0 else 1.0
         else:
             npmi = -1.0
         G[u][v]["weight"] = round(npmi, 4)

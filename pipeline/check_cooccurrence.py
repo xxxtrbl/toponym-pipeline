@@ -2,7 +2,7 @@
 Iterative co-occurrence guided toponym extraction (Iteration 2+).
 
 For each page where the previous iteration found at least one toponym:
-  1. Predict candidate toponyms via co-occurrence graph (top-5 NPMI neighbors)
+  1. Predict candidate toponyms via co-occurrence graph (top-K NPMI neighbors, default 10)
   2. Single LLM call: given full page text + candidate list, extract confirmed toponyms
   3. Update page_toponyms and rebuild the co-occurrence graph
 Repeats until no new toponyms are recovered or --max-iter is reached.
@@ -129,7 +129,7 @@ def load_pages_from_ndjson(ndjson_path: str, page_ids: set[str]) -> dict[str, di
 
 def parse_matches(response: str) -> list[str]:
     """Extract surface forms marked as @@surface## in the LLM response."""
-    return re.findall(r'@@(.*?)##', response)
+    return re.findall(r'@@([^@#]+)##', response)
 
 
 def extract_from_candidates(text: str, candidates: list[str], client: OpenAI, model: str) -> list[str]:
@@ -141,7 +141,9 @@ def extract_from_candidates(text: str, candidates: list[str], client: OpenAI, mo
         temperature=0,
         max_tokens=16384,
     )
-    return parse_matches(response.choices[0].message.content)
+    matches = parse_matches(response.choices[0].message.content)
+    # Drop partial-word matches (e.g. "Persia" extracted from "Persian")
+    return [m for m in matches if re.search(r'(?<!\w)' + re.escape(m) + r'(?!\w)', text, re.IGNORECASE)]
 
 
 def rebuild_graph(page_toponyms: dict[str, list[str]]) -> nx.Graph:
@@ -168,7 +170,8 @@ def rebuild_graph(page_toponyms: dict[str, list[str]]) -> nx.Graph:
         puv = cocount / N
         if pu > 0 and pv > 0 and puv > 0:
             pmi = math.log2(puv / (pu * pv))
-            npmi = pmi / -math.log2(puv)
+            denom = -math.log2(puv)
+            npmi = pmi / denom if denom != 0 else 1.0
         else:
             npmi = -1.0
         G[u][v]["weight"] = round(npmi, 4)
@@ -186,6 +189,7 @@ def process_one_iteration(
     log_file,
     tried_per_page: dict[str, set[str]],
     rejected_nodes: set[str],
+    top_k: int = 10,
 ) -> tuple[dict[str, list[str]], int]:
     """Run one pass over all eligible pages. Returns (updated_page_toponyms, total_recovered)."""
     pages_to_process = {pid: tops for pid, tops in page_toponyms.items() if tops and pid in page_texts}
@@ -205,8 +209,14 @@ def process_one_iteration(
                     key=lambda b: G[toponym][b]["weight"],
                     reverse=True,
                 )
-                predicted.update(neighbors[:5])
+                predicted.update(neighbors[:top_k])
         predicted -= set(found_toponyms)
+
+        # Drop candidates that are substrings of already-found toponyms on this page
+        found_lower = {t.lower() for t in found_toponyms}
+        substring_filtered = {c for c in predicted if any(c.lower() in f for f in found_lower)}
+        predicted -= substring_filtered
+        tried_per_page.setdefault(page_id, set()).update(substring_filtered)
 
         new_predicted = predicted - tried_per_page.get(page_id, set())
         if not new_predicted:
@@ -220,12 +230,13 @@ def process_one_iteration(
             print(f"  [{i+1}/{len(pages_to_process)}] ERROR {page_id}: {e}", file=sys.stderr)
             continue
 
-        found_lower = {t.lower() for t in found_toponyms}
         rejected_lower = {r.lower() for r in rejected_nodes}
-        candidates_for_typing = [
+        candidates_for_typing = list(dict.fromkeys(
             s for s in confirmed
-            if s.lower() not in found_lower and s.lower() not in rejected_lower
-        ]
+            if s.lower() not in found_lower
+            and s.lower() not in rejected_lower
+            and not any(s.lower() in f for f in found_lower)
+        ))
 
         newly_confirmed = []
         for term in candidates_for_typing:
@@ -275,6 +286,7 @@ def main():
     parser.add_argument("--output", required=True, help="Output folder (overwritten each iteration)")
     parser.add_argument("--model", default="qwen3-72b", help="Model name served by vLLM")
     parser.add_argument("--max-iter", type=int, default=10, help="Maximum number of iterations to run")
+    parser.add_argument("--top-k", type=int, default=10, help="Top-K NPMI neighbors to use as candidates per toponym")
     parser.add_argument("--limit", type=int, default=None, help="Max pages to process (for testing)")
     args = parser.parse_args()
 
@@ -308,6 +320,7 @@ def main():
     log_path = output_dir / "log.jsonl"
     iterations_done = 0
     tried_per_page: dict[str, set[str]] = {}
+    initial_rejected = set(rejected_nodes)
 
     with open(log_path, "w", encoding="utf-8") as log_file:
         for n in range(2, args.max_iter + 2):
@@ -316,7 +329,7 @@ def main():
             print(f"{'=' * 60}")
 
             page_toponyms, total_recovered = process_one_iteration(
-                page_toponyms, G, page_texts, client, args.model, n, log_file, tried_per_page, rejected_nodes
+                page_toponyms, G, page_texts, client, args.model, n, log_file, tried_per_page, rejected_nodes, args.top_k
             )
             iterations_done += 1
 
@@ -325,6 +338,8 @@ def main():
             with open(output_dir / "page_toponyms.json", "w", encoding="utf-8") as f:
                 json.dump(page_toponyms, f, ensure_ascii=False, indent=2)
             nx.write_gexf(G, output_dir / "cooccurrence_graph.gexf")
+            with open(output_dir / "itern_rejected_nodes.json", "w", encoding="utf-8") as f:
+                json.dump({"itern_rejected_nodes": sorted(rejected_nodes - initial_rejected)}, f, ensure_ascii=False, indent=2)
 
             log_file.write(json.dumps({
                 "summary": True,
