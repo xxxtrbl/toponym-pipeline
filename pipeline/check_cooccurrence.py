@@ -23,42 +23,23 @@ import networkx as nx
 from openai import OpenAI
 
 EXTRACT_PROMPT = """\
-You are an expert linguist specializing in historical place names.
+You are an expert at identifying place names in historical texts.
 
-The following place names are predicted to appear in the text below, based on co-occurrence \
-patterns in the corpus. They may appear in variant spellings, different romanizations, or \
-with minor OCR distortions:
+Based on co-occurrence patterns in the corpus, the following place names are predicted to \
+also appear on this page — possibly in a variant spelling, different romanization, or \
+slightly distorted by OCR:
 {candidates}
 
-Mark each term in the text that corresponds to a candidate above by wrapping it with @@ and ##.
+Read the text below and identify which of the candidates above actually appear in it.
 
 Rules:
-- Only mark terms that correspond to a candidate above.
-- Mark the exact surface form as it appears in the text.
-- Only mark place names (cities, countries, regions, rivers, mountains) — not adjectives, \
-demonyms, dynasty names, or period names (e.g. "Persian", "Chinese", "T'ang", "Tsin").
-- If no candidates appear, return the text unchanged.
+- Only confirm candidates from the list above. Do not add new toponyms.
+- A candidate may appear as a romanization variant or with minor OCR errors — match by meaning.
+- Only confirm if the term is used as a place name (noun), not as an adjective or demonym \
+(e.g. "Persian", "Chinese", "Iranian").
 
-Examples (candidates shown for context):
-Candidates: France, Britain, Ireland
-Input:  Only France and Britain backed Fischler's proposal.
-Output: Only @@France## and @@Britain## backed Fischler's proposal.
-
-Candidates: India, Persia, China
-Input:  In the T'ang period, several Indian and Persian texts were translated.
-Output: In the T'ang period, several Indian and Persian texts were translated.
-
-Candidates: Iran, Malaya
-Input:  Several Iranian manuscripts and Malayan traders were found along the route.
-Output: Several Iranian manuscripts and Malayan traders were found along the route.
-
-Candidates: Fu-lin, Turkistan
-Input:  In the T'ang period the Chinese learned that the people of Fulin relished grape-wine, \
-and that Turkistan had fallen into the hands of Turkish tribes.
-Output: In the T'ang period the Chinese learned that the people of @@Fulin## relished \
-grape-wine, and that @@Turkistan## had fallen into the hands of Turkish tribes.
-
-Return ONLY the full text with markings applied, nothing else.
+Return ONLY a JSON array where each element is a string in the format \
+"exact surface text from passage -> candidate name", or [] if none found.
 
 Text:
 {text}"""
@@ -127,23 +108,36 @@ def load_pages_from_ndjson(ndjson_path: str, page_ids: set[str]) -> dict[str, di
     return pages
 
 
-def parse_matches(response: str) -> list[str]:
-    """Extract surface forms marked as @@surface## in the LLM response."""
-    return re.findall(r'@@([^@#]+)##', response)
-
-
-def extract_from_candidates(text: str, candidates: list[str], client: OpenAI, model: str) -> list[str]:
-    candidate_str = "\n".join(candidates)
-    prompt = EXTRACT_PROMPT.replace("{candidates}", candidate_str).replace("{text}", text)
+def extract_from_candidates(text: str, predicates: list[str], client: OpenAI, model: str) -> list[str]:
+    predicate_str = "\n".join(predicates)
+    prompt = EXTRACT_PROMPT.replace("{candidates}", predicate_str).replace("{text}", text)
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         max_tokens=16384,
     )
-    matches = parse_matches(response.choices[0].message.content)
-    # Drop partial-word matches (e.g. "Persia" extracted from "Persian")
-    return [m for m in matches if re.search(r'(?<!\w)' + re.escape(m) + r'(?!\w)', text, re.IGNORECASE)]
+    content = response.choices[0].message.content.strip()
+    # strip markdown fences, then take the first [...] block
+    cleaned = re.sub(r'```(?:json)?\s*', '', content).strip()
+    arrays = re.findall(r'\[.*?\]', cleaned, re.DOTALL)
+    matches = []
+    if arrays:
+        try:
+            result = json.loads(arrays[0])
+            if isinstance(result, list):
+                for item in result:
+                    if not isinstance(item, str) or not item:
+                        continue
+                    if '->' in item:
+                        surface = item.split('->')[0].strip()
+                        if surface:
+                            matches.append(surface)
+                    else:
+                        matches.append(item.strip())
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return matches, content
 
 
 def rebuild_graph(page_toponyms: dict[str, list[str]]) -> nx.Graph:
@@ -225,18 +219,29 @@ def process_one_iteration(
         tried_per_page.setdefault(page_id, set()).update(new_predicted)
 
         try:
-            confirmed = extract_from_candidates(text, list(new_predicted), client, model)
+            confirmed, raw_response = extract_from_candidates(text, list(new_predicted), client, model)
         except Exception as e:
             print(f"  [{i+1}/{len(pages_to_process)}] ERROR {page_id}: {e}", file=sys.stderr)
             continue
 
-        rejected_lower = {r.lower() for r in rejected_nodes}
-        candidates_for_typing = list(dict.fromkeys(
-            s for s in confirmed
-            if s.lower() not in found_lower
-            and s.lower() not in rejected_lower
-            and not any(s.lower() in f for f in found_lower)
-        ))
+        candidates_for_typing = []
+        seen = set()
+        for s in confirmed:
+            if s in seen:
+                continue
+            seen.add(s)
+            if s.lower() in found_lower or any(s.lower() in f for f in found_lower):
+                log_file.write(json.dumps({
+                    "skipped": True, "iteration": iteration_num, "page_id": page_id,
+                    "term": s, "reason": f"already in found_toponyms: {found_toponyms}",
+                }, ensure_ascii=False) + "\n")
+            elif s in rejected_nodes:
+                log_file.write(json.dumps({
+                    "skipped": True, "iteration": iteration_num, "page_id": page_id,
+                    "term": s, "reason": "in rejected_nodes",
+                }, ensure_ascii=False) + "\n")
+            else:
+                candidates_for_typing.append(s)
 
         newly_confirmed = []
         for term in candidates_for_typing:
@@ -269,6 +274,8 @@ def process_one_iteration(
             "page_id": page_id,
             "found_toponyms": found_toponyms,
             "new_predicted": list(new_predicted),
+            "raw_response": raw_response,
+            "confirmed_raw": confirmed,
             "newly_confirmed": newly_confirmed,
         }, ensure_ascii=False) + "\n")
 
@@ -287,7 +294,6 @@ def main():
     parser.add_argument("--model", default="qwen3-72b", help="Model name served by vLLM")
     parser.add_argument("--max-iter", type=int, default=10, help="Maximum number of iterations to run")
     parser.add_argument("--top-k", type=int, default=10, help="Top-K NPMI neighbors to use as candidates per toponym")
-    parser.add_argument("--limit", type=int, default=None, help="Max pages to process (for testing)")
     args = parser.parse_args()
 
     client = OpenAI(
@@ -310,8 +316,6 @@ def main():
     ) if rejected_nodes_path.exists() else set()
 
     page_ids_to_load = {pid for pid, tops in page_toponyms.items() if tops}
-    if args.limit:
-        page_ids_to_load = set(list(page_ids_to_load)[:args.limit])
 
     print(f"Loading {len(page_ids_to_load)} pages from ndjson...")
     page_texts = load_pages_from_ndjson(args.input, page_ids_to_load)
