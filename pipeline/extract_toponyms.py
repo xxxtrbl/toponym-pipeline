@@ -23,7 +23,7 @@ Is the following term a place name (toponym)?
 Term: {term}
 Context: {context}
 
-Note: ethnic or tribal group names (e.g. "Hiuń-nu", "Yüe-či") are NON-TOPONYM even if associated with a region.
+If it appears as a toponym in any context, treat it as a toponym.
 Answer on two lines. Make sure Line 2 is consistent with Line 1:
 Line 1: TOPONYM or NON-TOPONYM
 Line 2: one sentence explaining why."""
@@ -32,7 +32,7 @@ PROMPT = """\
 Extract all place names (toponyms) from the text below.
 
 If no toponyms are found, return an empty array [].
-Return ONLY a JSON array of strings, one toponym per item, no explanation.
+Return ONLY a JSON array of strings, one toponym per item, exactly as it appears in the text, no explanation.
 
 Text:
 {text}"""
@@ -94,7 +94,9 @@ def iter_pages(ndjson_path: str, book: str | None, lang: str | None,
 def preprocess_text(text: str) -> str:
     """Join line-break hyphens, then replace remaining newlines with spaces."""
     text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
-    return text.replace('\n', ' ')
+    text = text.replace('\n', ' ')
+    text = re.sub(r'(?<=[一-鿿])\s+(?=[一-鿿])', '', text)
+    return text
 
 
 def dedup_toponyms(toponyms: list[str]) -> list[str]:
@@ -128,7 +130,7 @@ def get_context_snippet(text: str, term: str, context_chars: int = 150) -> str:
     return f"...{text[start:m.start()]}[{text[m.start():m.end()]}]{text[m.end():end]}..."
 
 
-def process_page(text: str, client: OpenAI, model: str) -> list[str]:
+def process_page(text: str, client: OpenAI, model: str) -> tuple[list[str], str]:
     prompt = PROMPT.replace("{text}", text)
     response = client.chat.completions.create(
         model=model,
@@ -136,7 +138,8 @@ def process_page(text: str, client: OpenAI, model: str) -> list[str]:
         temperature=0,
         max_tokens=16384,
     )
-    return parse_toponyms(response.choices[0].message.content)
+    raw = response.choices[0].message.content
+    return parse_toponyms(raw), raw
 
 
 def classify_node(term: str, contexts: list[str], client: OpenAI, model: str) -> tuple[bool, str]:
@@ -192,7 +195,7 @@ def main():
                 continue
 
             try:
-                toponyms = process_page(text, client, args.model)
+                toponyms, raw_response = process_page(text, client, args.model)
             except Exception as e:
                 print(f"  [{i}] ERROR {page_id}: {e}", file=sys.stderr)
                 continue
@@ -209,6 +212,7 @@ def main():
                 "language": page.get("language"),
                 "toponym_count": len(toponyms),
                 "toponyms": toponyms,
+                "raw_response": raw_response,
             }
             log_file.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 

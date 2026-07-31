@@ -33,7 +33,6 @@ slightly distorted by OCR:
 Read the text below and identify which of the candidates above actually appear in it.
 
 Rules:
-- Only confirm candidates from the list above. Do not add new toponyms.
 - A candidate may appear as a romanization variant or with minor OCR errors — match by meaning.
 - Only confirm if the term is used as a place name (noun), not as an adjective or demonym \
 (e.g. "Persian", "Chinese", "Iranian").
@@ -51,7 +50,7 @@ Is the following term a place name (toponym)?
 Term: {term}
 Context: {context}
 
-Note: ethnic or tribal group names (e.g. "Hiuń-nu", "Yüe-či") are NON-TOPONYM even if associated with a region.
+If it appears as a toponym in any context, treat it as a toponym.
 Answer on two lines. Make sure Line 2 is consistent with Line 1:
 Line 1: TOPONYM or NON-TOPONYM
 Line 2: one sentence explaining why."""
@@ -60,7 +59,9 @@ Line 2: one sentence explaining why."""
 def preprocess_text(text: str) -> str:
     """Join line-break hyphens, then replace remaining newlines with spaces."""
     text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
-    return text.replace('\n', ' ')
+    text = text.replace('\n', ' ')
+    text = re.sub(r'(?<=[一-鿿])\s+(?=[一-鿿])', '', text)
+    return text
 
 
 def get_context_snippet(text: str, term: str, context_chars: int = 150) -> str:
@@ -131,10 +132,10 @@ def extract_from_candidates(text: str, predicates: list[str], client: OpenAI, mo
                         continue
                     if '->' in item:
                         surface = item.split('->')[0].strip()
-                        if surface:
-                            matches.append(surface)
                     else:
-                        matches.append(item.strip())
+                        surface = item.strip()
+                    if surface and surface in text:
+                        matches.append(surface)
         except (json.JSONDecodeError, ValueError):
             pass
     return matches, content
