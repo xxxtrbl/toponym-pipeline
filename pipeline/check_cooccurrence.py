@@ -192,7 +192,8 @@ def process_one_iteration(
     total_recovered = 0
 
     for i, (page_id, found_toponyms) in enumerate(pages_to_process.items()):
-        text = preprocess_text(page_texts[page_id].get("full_text", "").strip())
+        captions = page_texts[page_id].get("captions") or []
+        text = preprocess_text((page_texts[page_id].get("body_text", "") + "\n" + "\n".join(captions)).strip())
         if not text:
             continue
 

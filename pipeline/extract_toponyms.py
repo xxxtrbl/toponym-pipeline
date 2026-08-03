@@ -190,7 +190,8 @@ def main():
         for page in pages:
             i += 1
             page_id = page.get("custom_id", f"page_{i}")
-            text = preprocess_text(page.get("full_text", "").strip())
+            captions = page.get("captions") or []
+            text = preprocess_text((page.get("body_text", "") + "\n" + "\n".join(captions)).strip())
             if not text or text == "(empty)":
                 continue
 
