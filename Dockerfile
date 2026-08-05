@@ -6,7 +6,8 @@ RUN pip install --no-cache-dir \
     openai \
     networkx \
     rapidfuzz \
-    lingua-language-detector
+    lingua-language-detector \
+    zhconv
 
 COPY pipeline/ ./pipeline/
 COPY data/ocr.ndjson ./data/ocr.ndjson
