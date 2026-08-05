@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 import networkx as nx
+import zhconv
 from openai import OpenAI
 
 EXTRACT_PROMPT = """\
@@ -39,6 +40,7 @@ Rules:
 
 Return ONLY a JSON array where each element is a string in the format \
 "exact surface text from passage -> candidate name", or [] if none found.
+The surface text must be the place name token itself, not a phrase containing it.
 
 Text:
 {text}"""
@@ -54,6 +56,20 @@ If it appears as a toponym in any context, treat it as a toponym.
 Answer on two lines. Make sure Line 2 is consistent with Line 1:
 Line 1: TOPONYM or NON-TOPONYM
 Line 2: one sentence explaining why."""
+
+
+_CJK_RE    = re.compile(r'[一-鿿]')
+_CJK_PUNCT = re.compile(r'[，。；：、！？]')
+
+def filter_toponyms(toponyms: list[str]) -> list[str]:
+    result = []
+    for t in toponyms:
+        if _CJK_PUNCT.search(t):
+            continue
+        if _CJK_RE.search(t) and len(t) > 12:
+            continue
+        result.append(zhconv.convert(t, 'zh-hant') if _CJK_RE.search(t) else t)
+    return result
 
 
 def preprocess_text(text: str) -> str:
@@ -268,6 +284,10 @@ def process_one_iteration(
                 rejected_nodes.add(term)
 
         if newly_confirmed:
+            newly_confirmed = filter_toponyms([
+                zhconv.convert(t, 'zh-hant') if _CJK_RE.search(t) else t
+                for t in newly_confirmed
+            ])
             updated_page_toponyms[page_id] = found_toponyms + list(dict.fromkeys(newly_confirmed))
             total_recovered += len(newly_confirmed)
 

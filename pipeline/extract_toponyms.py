@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import networkx as nx
+import zhconv
 from openai import OpenAI
 
 ENTITY_TYPE_PROMPT = """\
@@ -31,7 +32,7 @@ Line 2: one sentence explaining why."""
 PROMPT = """\
 Extract all place names (toponyms) from the text below.
 
-If no toponyms are found, return an empty array [].
+Return only the place name itself, not the surrounding phrase. If no toponyms are found, return [].
 Return ONLY a JSON array of strings, one toponym per item, exactly as it appears in the text, no explanation.
 
 Text:
@@ -97,6 +98,9 @@ def preprocess_text(text: str) -> str:
     text = text.replace('\n', ' ')
     text = re.sub(r'(?<=[一-鿿])\s+(?=[一-鿿])', '', text)
     return text
+
+
+_CJK_RE = re.compile(r'[一-鿿]')
 
 
 def dedup_toponyms(toponyms: list[str]) -> list[str]:
@@ -201,6 +205,7 @@ def main():
                 print(f"  [{i}] ERROR {page_id}: {e}", file=sys.stderr)
                 continue
 
+            toponyms = [zhconv.convert(t, 'zh-hant') if _CJK_RE.search(t) else t for t in toponyms]
             page_toponyms[page_id] = dedup_toponyms(toponyms)
 
             for t in toponyms:
