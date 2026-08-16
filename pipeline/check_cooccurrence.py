@@ -68,8 +68,8 @@ def filter_toponyms(toponyms: list[str]) -> list[str]:
             continue
         if _CJK_RE.search(t) and len(t) > 12:
             continue
-        result.append(zhconv.convert(t, 'zh-hant') if _CJK_RE.search(t) else t)
-    return result
+        result.append(t)
+    return list(dict.fromkeys(result))
 
 
 def preprocess_text(text: str) -> str:
@@ -125,7 +125,7 @@ def load_pages_from_ndjson(ndjson_path: str, page_ids: set[str]) -> dict[str, di
     return pages
 
 
-def extract_from_candidates(text: str, predicates: list[str], client: OpenAI, model: str) -> list[str]:
+def extract_from_candidates(text: str, predicates: list[str], client: OpenAI, model: str) -> tuple[list[str], str]:
     predicate_str = "\n".join(predicates)
     prompt = EXTRACT_PROMPT.replace("{candidates}", predicate_str).replace("{text}", text)
     response = client.chat.completions.create(
@@ -224,12 +224,6 @@ def process_one_iteration(
                 predicted.update(neighbors[:top_k])
         predicted -= set(found_toponyms)
 
-        # Drop candidates that are substrings of already-found toponyms on this page
-        found_lower = {t.lower() for t in found_toponyms}
-        substring_filtered = {c for c in predicted if any(c.lower() in f for f in found_lower)}
-        predicted -= substring_filtered
-        tried_per_page.setdefault(page_id, set()).update(substring_filtered)
-
         new_predicted = predicted - tried_per_page.get(page_id, set())
         if not new_predicted:
             continue
@@ -248,7 +242,7 @@ def process_one_iteration(
             if s in seen:
                 continue
             seen.add(s)
-            if s.lower() in found_lower or any(s.lower() in f for f in found_lower):
+            if s in found_toponyms:
                 log_file.write(json.dumps({
                     "skipped": True, "iteration": iteration_num, "page_id": page_id,
                     "term": s, "reason": f"already in found_toponyms: {found_toponyms}",
@@ -263,6 +257,7 @@ def process_one_iteration(
 
         newly_confirmed = []
         for term in candidates_for_typing:
+            term = zhconv.convert(term, 'zh-hant') if _CJK_RE.search(term) else term
             context = get_context_snippet(text, term)
             try:
                 is_toponym, reason = classify_node(term, context, client, model)
@@ -284,11 +279,8 @@ def process_one_iteration(
                 rejected_nodes.add(term)
 
         if newly_confirmed:
-            newly_confirmed = filter_toponyms([
-                zhconv.convert(t, 'zh-hant') if _CJK_RE.search(t) else t
-                for t in newly_confirmed
-            ])
-            updated_page_toponyms[page_id] = found_toponyms + list(dict.fromkeys(newly_confirmed))
+            newly_confirmed = filter_toponyms(newly_confirmed)
+            updated_page_toponyms[page_id] = found_toponyms + newly_confirmed
             total_recovered += len(newly_confirmed)
 
         log_file.write(json.dumps({

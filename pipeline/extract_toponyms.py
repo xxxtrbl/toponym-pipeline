@@ -104,15 +104,7 @@ _CJK_RE = re.compile(r'[一-鿿]')
 
 
 def dedup_toponyms(toponyms: list[str]) -> list[str]:
-    unique = list(dict.fromkeys(toponyms))
-    lower = [t.lower() for t in unique]
-    return [
-        t for i, t in enumerate(unique)
-        if not any(
-            re.search(r'\b' + re.escape(lower[i]) + r'\b', lower[j])
-            for j in range(len(unique)) if j != i and lower[i] != lower[j]
-        )
-    ]
+    return list(dict.fromkeys(toponyms))
 
 
 def parse_toponyms(response: str) -> list[str]:
@@ -208,6 +200,7 @@ def main():
             toponyms = [zhconv.convert(t, 'zh-hant') if _CJK_RE.search(t) else t for t in toponyms]
             page_toponyms[page_id] = dedup_toponyms(toponyms)
 
+            # only keep up to 3 context snippets per toponym
             for t in toponyms:
                 if len(toponym_contexts.get(t, [])) < 3:
                     snippet = get_context_snippet(text, t)
