@@ -138,19 +138,21 @@ def process_page(text: str, client: OpenAI, model: str) -> tuple[list[str], str]
     return parse_toponyms(raw), raw
 
 
-def classify_node(term: str, contexts: list[str], client: OpenAI, model: str) -> tuple[bool, str]:
+def classify_node(term: str, contexts: list[str], client: OpenAI, model: str) -> tuple[bool, str, str]:
     context_str = "\n".join(f"Context {i+1}: {c}" for i, c in enumerate(contexts))
     prompt = ENTITY_TYPE_PROMPT.replace("{term}", term).replace("{context}", context_str)
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        max_tokens=128,
+        max_tokens=256,
     )
-    lines = response.choices[0].message.content.strip().splitlines()
-    is_toponym = lines[0].strip().upper() == "TOPONYM" if lines else False
-    reason = lines[1].strip() if len(lines) > 1 else ""
-    return is_toponym, reason
+    raw = response.choices[0].message.content
+    lines = [l for l in raw.strip().splitlines() if l.strip()]
+    last = lines[-1].strip().upper() if lines else ""
+    is_toponym = "TOPONYM" in last and "NON" not in last
+    reason = lines[-2].strip() if len(lines) > 1 else ""
+    return is_toponym, reason, raw
 
 
 def main():
@@ -186,8 +188,10 @@ def main():
         for page in pages:
             i += 1
             page_id = page.get("custom_id", f"page_{i}")
-            captions = page.get("captions") or []
-            text = preprocess_text((page.get("body_text", "") + "\n" + "\n".join(captions)).strip())
+            parts = [page.get("body_text") or "", page.get("headers") or ""]
+            parts += page.get("footnotes") or []
+            parts += page.get("captions") or []
+            text = preprocess_text("\n".join(p for p in parts if p))
             if not text or text == "(empty)":
                 continue
 
@@ -257,7 +261,7 @@ def main():
         for j, term in enumerate(nodes):
             contexts = toponym_contexts.get(term, [])
             try:
-                is_toponym, reason = classify_node(term, contexts, client, args.model)
+                is_toponym, reason, raw = classify_node(term, contexts, client, args.model)
             except Exception as e:
                 print(f"  [{j+1}/{len(nodes)}] ERROR {term}: {e}", file=sys.stderr)
                 continue
@@ -266,6 +270,7 @@ def main():
                 "term": term,
                 "is_toponym": is_toponym,
                 "reason": reason,
+                "raw_response": raw,
                 "contexts": contexts,
             }, ensure_ascii=False) + "\n")
             if not is_toponym:

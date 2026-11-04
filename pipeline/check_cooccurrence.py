@@ -92,7 +92,7 @@ def get_context_snippet(text: str, term: str, context_chars: int = 150) -> str:
     return f"...{text[start:m.start()]}[{text[m.start():m.end()]}]{text[m.end():end]}..."
 
 
-def classify_node(term: str, context: str, client: OpenAI, model: str) -> tuple[bool, str]:
+def classify_node(term: str, context: str, client: OpenAI, model: str) -> tuple[bool, str, str]:
     prompt = ENTITY_TYPE_PROMPT.replace("{term}", term).replace("{context}", context)
     response = client.chat.completions.create(
         model=model,
@@ -100,10 +100,12 @@ def classify_node(term: str, context: str, client: OpenAI, model: str) -> tuple[
         temperature=0,
         max_tokens=128,
     )
-    lines = response.choices[0].message.content.strip().splitlines()
-    is_toponym = lines[0].strip().upper() == "TOPONYM" if lines else False
-    reason = lines[1].strip() if len(lines) > 1 else ""
-    return is_toponym, reason
+    raw = response.choices[0].message.content
+    lines = [l for l in raw.strip().splitlines() if l.strip()]
+    last = lines[-1].strip().upper() if lines else ""
+    is_toponym = "TOPONYM" in last and "NON" not in last
+    reason = lines[-2].strip() if len(lines) > 1 else ""
+    return is_toponym, reason, raw
 
 
 def load_pages_from_ndjson(ndjson_path: str, page_ids: set[str]) -> dict[str, dict]:
@@ -263,10 +265,10 @@ def process_one_iteration(
             term = zhconv.convert(term, 'zh-hant') if _CJK_RE.search(term) else term
             context = get_context_snippet(text, term)
             try:
-                is_toponym, reason = classify_node(term, context, client, model)
+                is_toponym, reason, raw = classify_node(term, context, client, model)
             except Exception as e:
                 print(f"    ERROR classifying {term}: {e}", file=sys.stderr)
-                is_toponym, reason = True, ""
+                is_toponym, reason, raw = True, "", ""
             log_file.write(json.dumps({
                 "entity_check": True,
                 "iteration": iteration_num,
@@ -274,6 +276,7 @@ def process_one_iteration(
                 "term": term,
                 "is_toponym": is_toponym,
                 "reason": reason,
+                "raw_response": raw,
                 "context": context,
             }, ensure_ascii=False) + "\n")
             if is_toponym:
