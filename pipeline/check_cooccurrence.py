@@ -102,9 +102,9 @@ def classify_node(term: str, context: str, client: OpenAI, model: str) -> tuple[
     )
     raw = response.choices[0].message.content
     lines = [l for l in raw.strip().splitlines() if l.strip()]
-    last = lines[-1].strip().upper() if lines else ""
-    is_toponym = "TOPONYM" in last and "NON" not in last
-    reason = lines[-2].strip() if len(lines) > 1 else ""
+    first = lines[-2].strip().upper() if len(lines) > 1 else (lines[-1].strip().upper() if lines else "")
+    is_toponym = "TOPONYM" in first and "NON" not in first
+    reason = lines[-1].strip() if lines else ""
     return is_toponym, reason, raw
 
 
