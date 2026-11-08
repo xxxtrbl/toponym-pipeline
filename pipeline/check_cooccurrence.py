@@ -40,8 +40,6 @@ Rules:
 
 Return ONLY a JSON array where each element is a string in the format \
 "exact surface text from passage -> candidate name", or [] if none found.
-The surface text must be the place name token itself, not a phrase containing it.
-OCR variants and minor spelling errors are acceptable; surrounding words or page numbers are not.
 
 Text:
 {text}"""

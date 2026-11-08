@@ -253,6 +253,9 @@ def main():
             npmi = -1.0
         G[u][v]["weight"] = round(npmi, 4)
 
+    with open(output_dir / "raw_page_toponyms.json", "w", encoding="utf-8") as f:
+        json.dump(page_toponyms, f, ensure_ascii=False, indent=2)
+
     # Pass 4: entity typing — classify every graph node, prune non-toponyms
     nodes = list(G.nodes())
     print(f"\n[Entity check] Classifying {len(nodes)} graph nodes...")
