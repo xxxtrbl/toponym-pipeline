@@ -51,6 +51,7 @@ Is the following term a place name (toponym)?
 Term: {term}
 Context: {context}
 
+Note: ethnic or tribal group names (e.g. "Hiuń-nu", "Yüe-či") are NON-TOPONYM even if associated with a region.
 If it appears as a toponym in any context, treat it as a toponym.
 Answer on two lines. Make sure Line 2 is consistent with Line 1:
 Line 1: TOPONYM or NON-TOPONYM
